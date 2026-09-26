@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-const XTREAM_HOST = process.env.XTREAM_SERVER_URL || "https://gmztv.vercel.app";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   try {
@@ -8,58 +9,152 @@ export async function POST(req: Request) {
 
     if (!username || !password) {
       return NextResponse.json(
-        { error: "Veuillez saisir votre identifiant et mot de passe" },
-        { status: 400 }
+        {
+          error:
+            "Veuillez saisir votre identifiant et mot de passe",
+        },
+        {
+          status: 400,
+        }
       );
     }
 
-    const cleanUrl = XTREAM_HOST.replace(/\/+$/, "");
+    const XTREAM_HOST =
+      process.env.XTREAM_SERVER_URL;
 
-    // Vérification auprès de l'API IPTV
-    const testRes = await fetch(
-      `${cleanUrl}/player_api.php?username=${encodeURIComponent(
-        username
-      )}&password=${encodeURIComponent(password)}`
+    if (!XTREAM_HOST) {
+      return NextResponse.json(
+        {
+          error:
+            "XTREAM_SERVER_URL manquante sur Railway",
+        },
+        {
+          status: 500,
+        }
+      );
+    }
+
+    const cleanUrl =
+      XTREAM_HOST.replace(/\/+$/, "");
+
+    const testUrl =
+      new URL(
+        `${cleanUrl}/player_api.php`
+      );
+
+    testUrl.searchParams.set(
+      "username",
+      username
     );
+
+    testUrl.searchParams.set(
+      "password",
+      password
+    );
+
+    const testRes =
+      await fetch(
+        testUrl.toString(),
+        {
+          headers: {
+            Accept:
+              "application/json",
+            "User-Agent":
+              "GTV/3.0",
+          },
+          cache:
+            "no-store",
+          signal:
+            AbortSignal.timeout(
+              15000
+            ),
+        }
+      );
 
     if (!testRes.ok) {
       return NextResponse.json(
-        { error: "Impossible de contacter le serveur IPTV" },
-        { status: 500 }
+        {
+          error:
+            `Impossible de contacter le serveur IPTV (${testRes.status})`,
+        },
+        {
+          status:
+            testRes.status,
+        }
       );
     }
 
-    const data = await testRes.json();
+    const data =
+      await testRes.json();
 
-    if (!data.user_info || data.user_info.auth === 0) {
+    if (
+      !data?.user_info ||
+      Number(
+        data.user_info.auth
+      ) === 0
+    ) {
       return NextResponse.json(
-        { error: "Identifiant ou mot de passe incorrect" },
-        { status: 401 }
+        {
+          error:
+            "Identifiant ou mot de passe incorrect",
+        },
+        {
+          status: 401,
+        }
       );
     }
 
-    // Création du cookie sécurisé gtv_session
-    const response = NextResponse.json({ success: true, user: data.user_info });
+    const sessionData =
+      JSON.stringify({
+        serverUrl:
+          cleanUrl,
+        username,
+        password,
+      });
 
-    const sessionData = JSON.stringify({
-      serverUrl: cleanUrl,
-      username,
-      password,
-    });
+    const response =
+      NextResponse.json({
+        success: true,
+        user:
+          data.user_info,
+      });
 
-    response.cookies.set("gtv_session", sessionData, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 30, // 30 jours
-    });
+    response.cookies.set(
+      "gtv_session",
+      sessionData,
+      {
+        httpOnly:
+          true,
+        secure:
+          process.env.NODE_ENV ===
+          "production",
+        sameSite:
+          "lax",
+        path:
+          "/",
+        maxAge:
+          60 *
+          60 *
+          24 *
+          30,
+      }
+    );
 
     return response;
-  } catch (err) {
+  } catch (error) {
+    console.error(
+      "[LOGIN]",
+      error
+    );
+
     return NextResponse.json(
-      { error: "Erreur de connexion au serveur" },
-      { status: 500 }
+      {
+        error:
+          "Erreur de connexion au serveur",
+      },
+      {
+        status: 500,
+      }
     );
   }
 }
