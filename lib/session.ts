@@ -1,25 +1,68 @@
 import { cookies } from "next/headers";
 import { XtreamCredentials } from "./xtream/types";
 
-// Host préinstallé
-const DEFAULT_HOST = process.env.XTREAM_SERVER_URL || "https://gmztv.vercel.app";
-
 export async function requireSession(): Promise<XtreamCredentials> {
-  const cookieStore = await cookies();
-  const sessionCookie = cookieStore.get("gtv_session")?.value;
+  const cookieStore =
+    await cookies();
 
-  if (sessionCookie) {
-    try {
-      const parsed = JSON.parse(sessionCookie);
-      return {
-        serverUrl: parsed.serverUrl || DEFAULT_HOST,
-        username: parsed.username,
-        password: parsed.password,
-      };
-    } catch (e) {
-      // Ignorer l'erreur
-    }
+  const sessionCookie =
+    cookieStore.get(
+      "gtv_session"
+    )?.value;
+
+  if (!sessionCookie) {
+    throw new Error(
+      "Session non trouvée. Veuillez vous connecter."
+    );
   }
 
-  throw new Error("Session non trouvée. Veuillez vous connecter.");
+  try {
+    const parsed =
+      JSON.parse(
+        sessionCookie
+      );
+
+    const serverUrl =
+      parsed?.serverUrl ||
+      process.env
+        .XTREAM_SERVER_URL;
+
+    const username =
+      parsed?.username;
+
+    const password =
+      parsed?.password;
+
+    if (
+      !serverUrl ||
+      !username ||
+      !password
+    ) {
+      throw new Error(
+        "Session Xtream incomplète"
+      );
+    }
+
+    return {
+      serverUrl:
+        String(
+          serverUrl
+        ).replace(
+          /\/+$/,
+          ""
+        ),
+      username:
+        String(
+          username
+        ),
+      password:
+        String(
+          password
+        ),
+    };
+  } catch {
+    throw new Error(
+      "Session non trouvée. Veuillez vous connecter."
+    );
+  }
 }
