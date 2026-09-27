@@ -5,7 +5,8 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const UA = "VLC/3.0.20 LibVLC/3.0.20";
+const UA =
+  "VLC/3.0.20 LibVLC/3.0.20";
 
 const FFMPEG =
   process.env.FFMPEG_PATH ||
@@ -20,16 +21,30 @@ const RAILWAY_URL =
 const HEADERS = {
   "Cache-Control":
     "no-store, no-cache, must-revalidate",
-  Pragma: "no-cache",
-  Expires: "0",
-  "Access-Control-Allow-Origin": "*",
-  "X-Accel-Buffering": "no",
+
+  Pragma:
+    "no-cache",
+
+  Expires:
+    "0",
+
+  "Access-Control-Allow-Origin":
+    "*",
+
+  "X-Accel-Buffering":
+    "no",
 };
+
+/* =========================================================
+   HELPERS
+========================================================= */
 
 function cleanHost(
   value: string
 ) {
-  return String(value || "").replace(
+  return String(
+    value || ""
+  ).replace(
     /\/+$/,
     ""
   );
@@ -45,48 +60,70 @@ function killProcess(
   } catch {}
 }
 
+/* =========================================================
+   ROUTE
+========================================================= */
+
 export async function GET(
   req: Request
 ) {
   try {
     const url =
-      new URL(req.url);
+      new URL(
+        req.url
+      );
 
     const {
       searchParams,
     } = url;
 
+    /* =====================================================
+       PARAMS
+    ===================================================== */
+
     const type =
-      searchParams.get("type") ===
-      "series"
+      searchParams.get(
+        "type"
+      ) === "series"
         ? "series"
         : "movie";
 
     const id =
-      searchParams.get("id");
+      searchParams.get(
+        "id"
+      );
 
     const ext =
       (
-        searchParams.get("ext") ||
+        searchParams.get(
+          "ext"
+        ) ||
         "mkv"
       )
         .toLowerCase()
         .replace(
           /[^a-z0-9]/g,
           ""
-        ) || "mkv";
+        ) ||
+      "mkv";
 
     const rawSeek =
       Number(
-        searchParams.get("t") ||
-        0
+        searchParams.get(
+          "t"
+        ) ||
+          0
       );
 
     const seek =
-      Number.isFinite(rawSeek)
+      Number.isFinite(
+        rawSeek
+      )
         ? Math.max(
             0,
-            Math.floor(rawSeek)
+            Math.floor(
+              rawSeek
+            )
           )
         : 0;
 
@@ -100,34 +137,47 @@ export async function GET(
       );
     }
 
+    /* =====================================================
+       DIRECT RAILWAY PARAMS
+    ===================================================== */
+
     const directHost =
-      searchParams.get("_h");
+      searchParams.get(
+        "_h"
+      );
 
     const directUser =
-      searchParams.get("_u");
+      searchParams.get(
+        "_u"
+      );
 
     const directPass =
-      searchParams.get("_p");
+      searchParams.get(
+        "_p"
+      );
 
-    let host = "";
-    let username = "";
-    let password = "";
+    let host =
+      "";
 
-    /*
-     * PREMIER APPEL:
-     * session Cloudflare/Railway.
-     *
-     * On redirige ensuite le navigateur
-     * directement vers Railway pour que
-     * le gros flux VOD ne traverse pas
-     * Cloudflare.
-     */
+    let username =
+      "";
+
+    let password =
+      "";
+
+    /* =====================================================
+       PREMIER APPEL
+       Cloudflare / frontend
+       -> Railway direct
+    ===================================================== */
+
     if (
       !directHost ||
       !directUser ||
       !directPass
     ) {
-      let session: any;
+      let session:
+        any;
 
       try {
         session =
@@ -136,8 +186,11 @@ export async function GET(
         return new Response(
           "Non autorisé",
           {
-            status: 401,
-            headers: HEADERS,
+            status:
+              401,
+
+            headers:
+              HEADERS,
           }
         );
       }
@@ -167,18 +220,29 @@ export async function GET(
         return new Response(
           "Identifiants Xtream incomplets",
           {
-            status: 400,
-            headers: HEADERS,
+            status:
+              400,
+
+            headers:
+              HEADERS,
           }
         );
       }
+
+      host =
+        cleanHost(
+          host
+        );
 
       if (!RAILWAY_URL) {
         return new Response(
           "RAILWAY_PUBLIC_URL manquante",
           {
-            status: 500,
-            headers: HEADERS,
+            status:
+              500,
+
+            headers:
+              HEADERS,
           }
         );
       }
@@ -204,13 +268,22 @@ export async function GET(
         ext
       );
 
-      if (seek > 0) {
+      if (
+        seek >
+        0
+      ) {
         target.searchParams.set(
           "t",
-          String(seek)
+          String(
+            seek
+          )
         );
       }
 
+      /*
+       * URLSearchParams encode
+       * automatiquement.
+       */
       target.searchParams.set(
         "_h",
         host
@@ -226,36 +299,66 @@ export async function GET(
         password
       );
 
+      console.log(
+        `[VOD REDIRECT] ${type} id=${id} seek=${seek}`
+      );
+
       return NextResponse.redirect(
         target,
         302
       );
     }
 
+    /* =====================================================
+       SECOND APPEL
+       Browser -> Railway direct
+    ===================================================== */
+
     /*
-     * SECOND APPEL:
-     * navigateur -> Railway direct.
+     * IMPORTANT :
+     *
+     * searchParams.get() a déjà
+     * décodé les paramètres URL.
+     *
+     * Donc PAS de decodeURIComponent()
+     * ici.
      */
 
     host =
       cleanHost(
-        decodeURIComponent(
-          directHost
-        )
+        directHost
       );
 
     username =
-      decodeURIComponent(
-        directUser
-      );
+      directUser;
 
     password =
-      decodeURIComponent(
-        directPass
+      directPass;
+
+    if (
+      !host ||
+      !username ||
+      !password
+    ) {
+      return new Response(
+        "Paramètres Railway incomplets",
+        {
+          status:
+            400,
+
+          headers:
+            HEADERS,
+        }
       );
+    }
+
+    /* =====================================================
+       XTREAM INPUT URL
+    ===================================================== */
 
     const folder =
-      type === "series"
+      type ===
+      "series"
         ? "series"
         : "movie";
 
@@ -271,56 +374,111 @@ export async function GET(
         id
       )}.${ext}`;
 
+    /* =====================================================
+       FFMPEG
+    ===================================================== */
+
     const args = [
       "-hide_banner",
+
+      /*
+       * Pendant debug :
+       * warning donne plus d'informations
+       * que error.
+       */
       "-loglevel",
-      "error",
+      "warning",
+
       "-nostdin",
+
+      /* ===============================================
+         HTTP / XTREAM
+      =============================================== */
 
       "-user_agent",
       UA,
 
+      /*
+       * 60 secondes.
+       *
+       * L'ancienne valeur 10000000
+       * = seulement 10 secondes.
+       */
       "-rw_timeout",
-      "10000000",
+      "60000000",
+
+      /*
+       * Reconnexion HTTP automatique.
+       */
+      "-reconnect",
+      "1",
+
+      "-reconnect_streamed",
+      "1",
+
+      "-reconnect_at_eof",
+      "1",
+
+      "-reconnect_delay_max",
+      "10",
+
+      /* ===============================================
+         INPUT
+      =============================================== */
 
       "-fflags",
       "+genpts+discardcorrupt",
 
       /*
-       * Réduit le temps avant démarrage.
+       * Un peu plus généreux afin
+       * d'éviter les flux mal détectés.
        */
       "-analyzeduration",
-      "2000000",
+      "5000000",
 
       "-probesize",
-      "3000000",
+      "5000000",
 
+      /*
+       * SEEK
+       */
       ...(seek > 0
         ? [
             "-ss",
-            String(seek),
+            String(
+              seek
+            ),
           ]
         : []),
 
       "-i",
       inputUrl,
 
+      /* ===============================================
+         STREAM MAP
+      =============================================== */
+
       "-map",
-      "0:v:0",
+      "0:v:0?",
 
       "-map",
       "0:a:0?",
 
+      /* ===============================================
+         VIDEO
+      =============================================== */
+
       /*
-       * VIDEO COPY:
-       * pas de réencodage vidéo.
+       * Pas de réencodage vidéo :
+       * beaucoup moins de CPU Railway.
        */
       "-c:v",
       "copy",
 
-      /*
-       * AUDIO AAC navigateur.
-       */
+      /* ===============================================
+         AUDIO
+      =============================================== */
+
       "-c:a",
       "aac",
 
@@ -333,14 +491,33 @@ export async function GET(
       "-af",
       "aresample=async=1:first_pts=0",
 
+      /* ===============================================
+         TIMESTAMPS
+      =============================================== */
+
       "-avoid_negative_ts",
       "make_zero",
 
-      /*
-       * MP4 fragmenté immédiatement lisible.
-       */
+      /* ===============================================
+         MP4 STREAMING
+      =============================================== */
+
       "-movflags",
-      "frag_keyframe+empty_moov+default_base_moof",
+      "frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset",
+
+      /*
+       * Nouveau fragment environ
+       * toutes les 2 secondes.
+       */
+      "-frag_duration",
+      "2000000",
+
+      /*
+       * Envoie les paquets immédiatement
+       * au navigateur.
+       */
+      "-flush_packets",
+      "1",
 
       "-f",
       "mp4",
@@ -349,8 +526,12 @@ export async function GET(
     ];
 
     console.log(
-      `[VOD] ${type} id=${id} ext=${ext} seek=${seek}`
+      `[VOD START] type=${type} id=${id} ext=${ext} seek=${seek}`
     );
+
+    /* =====================================================
+       SPAWN
+    ===================================================== */
 
     const ff =
       spawn(
@@ -365,51 +546,100 @@ export async function GET(
         }
       );
 
-    let stderr = "";
+    let stderr =
+      "";
+
+    /* =====================================================
+       STDERR
+    ===================================================== */
 
     ff.stderr.on(
       "data",
-      (chunk) => {
-        stderr +=
+      (
+        chunk
+      ) => {
+        const message =
           chunk.toString();
 
+        stderr +=
+          message;
+
+        /*
+         * Évite que Railway stocke
+         * des Mo de logs en mémoire.
+         */
         if (
           stderr.length >
-          8000
+          12000
         ) {
           stderr =
-            stderr.slice(-8000);
+            stderr.slice(
+              -12000
+            );
         }
       }
     );
 
+    /* =====================================================
+       PROCESS ERROR
+    ===================================================== */
+
+    ff.on(
+      "error",
+      (
+        error
+      ) => {
+        console.error(
+          `[VOD FFMPEG SPAWN ERROR] type=${type} id=${id}`,
+          error
+        );
+      }
+    );
+
+    /* =====================================================
+       PROCESS CLOSE
+    ===================================================== */
+
     ff.on(
       "close",
-      (code, signal) => {
+      (
+        code,
+        signal
+      ) => {
+        console.log(
+          `[VOD FFMPEG CLOSED] type=${type} id=${id} code=${code} signal=${signal}`
+        );
+
         if (
-          code !== 0 &&
-          code !== null &&
-          signal !==
-            "SIGKILL"
+          stderr.trim()
         ) {
-          console.error(
-            "[VOD FFMPEG]",
-            code,
-            signal,
-            stderr
+          console.log(
+            `[VOD FFMPEG STDERR] type=${type} id=${id}\n${stderr}`
           );
         }
       }
     );
 
+    /* =====================================================
+       RESPONSE STREAM
+    ===================================================== */
+
     const stream =
       new ReadableStream<
         Uint8Array
       >({
-        start(controller) {
+        start(
+          controller
+        ) {
+          /*
+           * FFmpeg -> Browser
+           */
           ff.stdout.on(
             "data",
-            (chunk: Buffer) => {
+            (
+              chunk:
+                Buffer
+            ) => {
               try {
                 controller.enqueue(
                   new Uint8Array(
@@ -417,11 +647,16 @@ export async function GET(
                   )
                 );
               } catch {
-                killProcess(ff);
+                killProcess(
+                  ff
+                );
               }
             }
           );
 
+          /*
+           * Fin normale du stdout.
+           */
           ff.stdout.on(
             "end",
             () => {
@@ -431,57 +666,77 @@ export async function GET(
             }
           );
 
+          /*
+           * Erreur stdout.
+           */
           ff.stdout.on(
             "error",
-            (error) => {
+            (
+              error
+            ) => {
+              console.error(
+                `[VOD STDOUT ERROR] type=${type} id=${id}`,
+                error
+              );
+
               try {
                 controller.error(
                   error
                 );
               } catch {}
 
-              killProcess(ff);
-            }
-          );
-
-          ff.on(
-            "error",
-            (error) => {
-              try {
-                controller.error(
-                  error
-                );
-              } catch {}
+              killProcess(
+                ff
+              );
             }
           );
         },
 
-        cancel() {
-          killProcess(ff);
+        /*
+         * Le navigateur a réellement
+         * abandonné le body.
+         */
+        cancel(
+          reason
+        ) {
+          console.log(
+            `[VOD STREAM CANCEL] type=${type} id=${id}`,
+            reason || ""
+          );
+
+          killProcess(
+            ff
+          );
         },
       });
 
-    const abort =
-      () => {
-        killProcess(ff);
-      };
+    /*
+     * IMPORTANT :
+     *
+     * Pour le moment on NE tue PAS
+     * FFmpeg avec req.signal.
+     *
+     * Sur certaines configurations
+     * Next/Railway le Request.signal
+     * peut être déclenché alors que le
+     * body vidéo est encore utilisé.
+     *
+     * Le cancel() du ReadableStream
+     * reste responsable de fermer FFmpeg
+     * quand le navigateur abandonne
+     * réellement le flux.
+     */
 
-    if (req.signal.aborted) {
-      abort();
-    } else {
-      req.signal.addEventListener(
-        "abort",
-        abort,
-        {
-          once: true,
-        }
-      );
-    }
+    /* =====================================================
+       RESPONSE
+    ===================================================== */
 
     return new Response(
       stream,
       {
-        status: 200,
+        status:
+          200,
+
         headers: {
           ...HEADERS,
 
@@ -491,18 +746,28 @@ export async function GET(
           "Content-Disposition":
             "inline",
 
+          /*
+           * Ce flux est généré à la volée.
+           * Les seeks passent par ?t=
+           * et redémarrent FFmpeg.
+           */
           "Accept-Ranges":
             "none",
 
           "X-GTV-Mode":
-            "fast-remux",
+            "stable-remux",
 
           "X-GTV-Seek":
-            String(seek),
+            String(
+              seek
+            ),
         },
       }
     );
-  } catch (error: any) {
+  } catch (
+    error:
+      any
+  ) {
     console.error(
       "[STREAM-VOD]",
       error
@@ -514,8 +779,11 @@ export async function GET(
         "unknown"
       }`,
       {
-        status: 500,
-        headers: HEADERS,
+        status:
+          500,
+
+        headers:
+          HEADERS,
       }
     );
   }
