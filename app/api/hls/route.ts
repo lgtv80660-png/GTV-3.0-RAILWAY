@@ -38,7 +38,7 @@ export async function GET(req: Request) {
     creds,
     "live",
     id,
-    "m3u8"
+    "ts"
   );
 
   try {
