@@ -6,6 +6,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const UA = "VLC/3.0.20 LibVLC/3.0.20";
+const MAX_REDIRECTS = 5;
+const TIMEOUT = 12000;
 
 function safeError(err: any) {
   return {
@@ -32,24 +34,43 @@ function safeTarget(rawUrl: string) {
   }
 }
 
-async function testFetch(
-  name: string,
-  url: string,
-  timeout = 10000
-) {
+function maskedAddress(address: string, family: number) {
+  if (family === 4) {
+    return address.replace(/\.\d+$/, ".xxx");
+  }
+
+  return "[IPv6]";
+}
+
+async function lookupHost(hostname: string) {
+  try {
+    const addresses = await dns.lookup(hostname, {
+      all: true,
+    });
+
+    return addresses.map((item) => ({
+      family: item.family,
+      address: maskedAddress(
+        item.address,
+        item.family
+      ),
+    }));
+  } catch (err: any) {
+    return {
+      error: safeError(err),
+    };
+  }
+}
+
+async function testOrigin(rawUrl: string) {
+  const target = new URL(rawUrl);
+
+  const origin = target.origin;
+
   const started = Date.now();
 
   try {
-    /*
-     * IMPORTANT:
-     * manual = on NE suit PAS automatiquement
-     * les redirections.
-     *
-     * Cela permet de voir où le serveur
-     * veut nous envoyer sans exposer
-     * l'URL complète.
-     */
-    const res = await fetch(url, {
+    const res = await fetch(origin, {
       method: "GET",
 
       headers: {
@@ -60,84 +81,270 @@ async function testFetch(
       redirect: "manual",
       cache: "no-store",
 
-      signal: AbortSignal.timeout(timeout),
+      signal: AbortSignal.timeout(
+        TIMEOUT
+      ),
     });
 
-    const location =
-      res.headers.get("location");
-
-    let redirectTarget:
-      | {
-          protocol: string;
-          hostname: string;
-          port: string;
-        }
-      | null = null;
-
-    if (location) {
-      try {
-        /*
-         * Supporte aussi les redirects relatifs.
-         */
-        const target = new URL(
-          location,
-          url
-        );
-
-        redirectTarget = {
-          protocol: target.protocol,
-          hostname: target.hostname,
-
-          port:
-            target.port ||
-            (target.protocol === "https:"
-              ? "443"
-              : "80"),
-        };
-      } catch {
-        redirectTarget = null;
-      }
-    }
-
     return {
-      name,
-
       ok: true,
-
       status: res.status,
-
-      ms:
-        Date.now() -
-        started,
-
-      contentType:
-        res.headers.get(
-          "content-type"
-        ),
-
-      redirect: Boolean(location),
-
-      /*
-       * AUCUN PATH
-       * AUCUN USERNAME
-       * AUCUN PASSWORD
-       */
-      redirectTarget,
+      ms: Date.now() - started,
     };
   } catch (err: any) {
     return {
-      name,
-
       ok: false,
-
-      ms:
-        Date.now() -
-        started,
-
-      error:
-        safeError(err),
+      ms: Date.now() - started,
+      error: safeError(err),
     };
   }
+}
+
+async function followRedirectChain(
+  initialUrl: string
+) {
+  const steps: any[] = [];
+
+  let currentUrl = initialUrl;
+
+  for (
+    let index = 0;
+    index <= MAX_REDIRECTS;
+    index++
+  ) {
+    const currentSafe =
+      safeTarget(currentUrl);
+
+    if (!currentSafe) {
+      steps.push({
+        step: index + 1,
+        ok: false,
+        error: "Invalid URL",
+      });
+
+      break;
+    }
+
+    /*
+     * DNS de chaque serveur rencontré.
+     */
+    const dnsResult =
+      await lookupHost(
+        currentSafe.hostname
+      );
+
+    const started =
+      Date.now();
+
+    try {
+      /*
+       * IMPORTANT :
+       * redirect manual.
+       *
+       * On contrôle chaque saut
+       * nous-mêmes.
+       */
+      const res = await fetch(
+        currentUrl,
+        {
+          method: "GET",
+
+          headers: {
+            "User-Agent": UA,
+
+            Accept:
+              "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
+          },
+
+          redirect: "manual",
+
+          cache: "no-store",
+
+          signal:
+            AbortSignal.timeout(
+              TIMEOUT
+            ),
+        }
+      );
+
+      const elapsed =
+        Date.now() -
+        started;
+
+      const location =
+        res.headers.get(
+          "location"
+        );
+
+      const contentType =
+        res.headers.get(
+          "content-type"
+        );
+
+      const contentLength =
+        res.headers.get(
+          "content-length"
+        );
+
+      /*
+       * On ne retourne JAMAIS
+       * currentUrl.
+       *
+       * Seulement :
+       * protocol
+       * hostname
+       * port
+       */
+      const step: any = {
+        step: index + 1,
+
+        target:
+          currentSafe,
+
+        dns:
+          dnsResult,
+
+        ok: true,
+
+        status:
+          res.status,
+
+        ms:
+          elapsed,
+
+        contentType:
+          contentType ||
+          null,
+
+        contentLength:
+          contentLength ||
+          null,
+
+        redirect:
+          Boolean(location),
+
+        redirectTarget:
+          null,
+      };
+
+      /*
+       * REDIRECTION
+       */
+      if (location) {
+        try {
+          const nextUrl =
+            new URL(
+              location,
+              currentUrl
+            ).toString();
+
+          step.redirectTarget =
+            safeTarget(
+              nextUrl
+            );
+
+          steps.push(step);
+
+          /*
+           * On continue avec
+           * l'URL COMPLÈTE uniquement
+           * côté serveur.
+           *
+           * Elle ne sera jamais
+           * retournée au navigateur.
+           */
+          currentUrl =
+            nextUrl;
+
+          continue;
+        } catch {
+          step.redirectError =
+            "Invalid redirect URL";
+
+          steps.push(step);
+
+          break;
+        }
+      }
+
+      /*
+       * Pas de redirect :
+       * on regarde seulement un petit
+       * morceau du body pour savoir
+       * si on a enfin reçu un M3U8.
+       *
+       * On ne retourne PAS son contenu.
+       */
+      let bodyInfo: any = null;
+
+      try {
+        const text =
+          await res.text();
+
+        bodyInfo = {
+          bytes:
+            Buffer.byteLength(
+              text,
+              "utf8"
+            ),
+
+          isM3U8:
+            text.includes(
+              "#EXTM3U"
+            ),
+
+          hasExtInf:
+            text.includes(
+              "#EXTINF"
+            ),
+
+          hasStreamInf:
+            text.includes(
+              "#EXT-X-STREAM-INF"
+            ),
+        };
+      } catch (err: any) {
+        bodyInfo = {
+          readError:
+            safeError(err),
+        };
+      }
+
+      step.body =
+        bodyInfo;
+
+      steps.push(step);
+
+      /*
+       * Fin de chaîne.
+       */
+      break;
+    } catch (err: any) {
+      steps.push({
+        step:
+          index + 1,
+
+        target:
+          currentSafe,
+
+        dns:
+          dnsResult,
+
+        ok: false,
+
+        ms:
+          Date.now() -
+          started,
+
+        error:
+          safeError(err),
+      });
+
+      break;
+    }
+  }
+
+  return steps;
 }
 
 export async function GET(
@@ -163,6 +370,7 @@ export async function GET(
       },
       {
         status: 401,
+
         headers: {
           "Cache-Control":
             "no-store",
@@ -173,10 +381,13 @@ export async function GET(
 
   const {
     searchParams,
-  } = new URL(req.url);
+  } =
+    new URL(req.url);
 
   const id =
-    searchParams.get("id");
+    searchParams.get(
+      "id"
+    );
 
   if (!id) {
     return Response.json(
@@ -187,6 +398,7 @@ export async function GET(
       },
       {
         status: 400,
+
         headers: {
           "Cache-Control":
             "no-store",
@@ -198,11 +410,9 @@ export async function GET(
   try {
     /*
      * =========================
-     * LIVE URL
+     * CONSTRUCTION EXACTE
+     * DU LIVE
      * =========================
-     *
-     * Exactement la même construction
-     * que /api/hls.
      */
 
     const liveUrl =
@@ -213,77 +423,50 @@ export async function GET(
         "m3u8"
       );
 
-    const live =
-      new URL(liveUrl);
+    const initialTarget =
+      safeTarget(
+        liveUrl
+      );
 
-    /*
-     * =========================
-     * DNS DU HOST PRINCIPAL
-     * =========================
-     */
-
-    let dnsResult: any;
-
-    try {
-      const addresses =
-        await dns.lookup(
-          live.hostname,
-          {
-            all: true,
-          }
-        );
-
-      dnsResult =
-        addresses.map(
-          (item) => ({
-            family:
-              item.family,
-
-            /*
-             * On masque le dernier
-             * octet IPv4.
-             */
-            address:
-              item.family === 4
-                ? item.address.replace(
-                    /\.\d+$/,
-                    ".xxx"
-                  )
-                : "[IPv6]",
-          })
-        );
-    } catch (err: any) {
-      dnsResult = {
-        error:
-          safeError(err),
-      };
+    if (!initialTarget) {
+      return Response.json(
+        {
+          ok: false,
+          error:
+            "Invalid Live URL",
+        },
+        {
+          status: 500,
+        }
+      );
     }
 
     /*
      * =========================
-     * TEST 1
-     * ORIGIN
+     * TEST ORIGIN INITIAL
      * =========================
      */
 
     const originTest =
-      await testFetch(
-        "origin",
-        live.origin,
-        10000
+      await testOrigin(
+        liveUrl
       );
 
     /*
      * =========================
-     * TEST 2
      * PLAYER API
      * =========================
      */
 
+    const liveParsed =
+      new URL(
+        liveUrl
+      );
+
     const playerApi =
       new URL(
         "/player_api.php",
-        live.origin
+        liveParsed.origin
       );
 
     playerApi.searchParams.set(
@@ -300,89 +483,80 @@ export async function GET(
       )
     );
 
-    const apiTest =
-      await testFetch(
-        "player_api",
-        playerApi.toString(),
-        10000
-      );
+    const playerStarted =
+      Date.now();
 
-    /*
-     * =========================
-     * TEST 3
-     * LIVE M3U8
-     * =========================
-     *
-     * redirect: manual
-     *
-     * On veut connaître le serveur
-     * vers lequel gmztv.vercel.app
-     * redirige réellement le Live.
-     */
+    let playerApiTest:
+      any;
 
-    const liveTest =
-      await testFetch(
-        "live_m3u8",
-        liveUrl,
-        12000
-      );
+    try {
+      const res =
+        await fetch(
+          playerApi.toString(),
+          {
+            headers: {
+              "User-Agent":
+                "GTV/3.0",
 
-    /*
-     * =========================
-     * TEST 4
-     * REDIRECT TARGET ORIGIN
-     * =========================
-     *
-     * Si le Live retourne 301/302/etc.,
-     * on teste uniquement l'ORIGIN
-     * du serveur cible.
-     *
-     * On n'envoie PAS le chemin Live
-     * et donc aucun credential.
-     */
+              Accept:
+                "application/json",
+            },
 
-    let redirectOriginTest:
-      any = null;
+            redirect:
+              "manual",
 
-    const redirectTarget =
-      (liveTest as any)
-        ?.redirectTarget;
+            cache:
+              "no-store",
 
-    if (
-      redirectTarget?.protocol &&
-      redirectTarget?.hostname
-    ) {
-      const redirectOrigin =
-        `${redirectTarget.protocol}//${redirectTarget.hostname}` +
-        (
-          redirectTarget.port &&
-          !(
-            redirectTarget.protocol ===
-              "https:" &&
-            redirectTarget.port ===
-              "443"
-          ) &&
-          !(
-            redirectTarget.protocol ===
-              "http:" &&
-            redirectTarget.port ===
-              "80"
-          )
-            ? `:${redirectTarget.port}`
-            : ""
+            signal:
+              AbortSignal.timeout(
+                12000
+              ),
+          }
         );
 
-      redirectOriginTest =
-        await testFetch(
-          "redirect_origin",
-          redirectOrigin,
-          12000
-        );
+      playerApiTest = {
+        ok: true,
+
+        status:
+          res.status,
+
+        ms:
+          Date.now() -
+          playerStarted,
+
+        contentType:
+          res.headers.get(
+            "content-type"
+          ),
+      };
+    } catch (err: any) {
+      playerApiTest = {
+        ok: false,
+
+        ms:
+          Date.now() -
+          playerStarted,
+
+        error:
+          safeError(err),
+      };
     }
 
     /*
      * =========================
-     * RESPONSE
+     * CHAÎNE LIVE
+     * =========================
+     */
+
+    const redirectChain =
+      await followRedirectChain(
+        liveUrl
+      );
+
+    /*
+     * =========================
+     * RESPONSE SAFE
      * =========================
      */
 
@@ -390,42 +564,25 @@ export async function GET(
       {
         ok: true,
 
-        streamId: id,
+        streamId:
+          id,
 
-        target:
-          safeTarget(
-            liveUrl
-          ),
+        initialTarget,
 
-        dns:
-          dnsResult,
+        originTest,
 
-        tests: [
-          originTest,
-          apiTest,
-          liveTest,
-          ...(redirectOriginTest
-            ? [
-                redirectOriginTest,
-              ]
-            : []),
-        ],
+        playerApiTest,
 
-        credentials: {
-          usernamePresent:
-            Boolean(
-              creds.username
-            ),
+        redirectChain,
 
-          passwordPresent:
-            Boolean(
-              creds.password
-            ),
+        security: {
+          usernameExposed:
+            false,
 
-          /*
-           * Valeurs jamais affichées.
-           */
-          valuesExposed:
+          passwordExposed:
+            false,
+
+          fullUrlExposed:
             false,
         },
       },
