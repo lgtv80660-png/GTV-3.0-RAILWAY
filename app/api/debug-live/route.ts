@@ -27,7 +27,7 @@ function safeError(err: any) {
 
 /* =========================================================
    SAFE TARGET
-   Ne retourne JAMAIS le path / user / password
+   Jamais de path / username / password
 ========================================================= */
 
 function safeTarget(rawUrl: string) {
@@ -50,31 +50,55 @@ function safeTarget(rawUrl: string) {
    MASK IP
 ========================================================= */
 
-function maskIp(address: string, family?: number) {
-  if (family === 6 || address.includes(":")) {
+function maskIp(
+  address: string,
+  family?: number
+) {
+  if (
+    family === 6 ||
+    address.includes(":")
+  ) {
     return "[IPv6]";
   }
 
-  return address.replace(/\.\d+$/, ".xxx");
+  return address.replace(
+    /\.\d+$/,
+    ".xxx"
+  );
 }
 
 /* =========================================================
    DNS LOOKUP
 ========================================================= */
 
-async function lookupHost(hostname: string) {
+async function lookupHost(
+  hostname: string
+) {
   try {
-    const addresses = await dns.lookup(hostname, {
-      all: true,
-    });
+    const addresses =
+      await dns.lookup(
+        hostname,
+        {
+          all: true,
+        }
+      );
 
-    return addresses.map((item) => ({
-      family: item.family,
-      address: maskIp(item.address, item.family),
-    }));
+    return addresses.map(
+      (item) => ({
+        family:
+          item.family,
+
+        address:
+          maskIp(
+            item.address,
+            item.family
+          ),
+      })
+    );
   } catch (err: any) {
     return {
-      error: safeError(err),
+      error:
+        safeError(err),
     };
   }
 }
@@ -88,102 +112,138 @@ async function tcpTest(
   port: number,
   timeout = TCP_TIMEOUT
 ) {
-  const started = Date.now();
+  const started =
+    Date.now();
 
-  return new Promise<any>((resolve) => {
-    const socket = net.createConnection({
-      host: hostname,
-      port,
-    });
+  return new Promise<any>(
+    (resolve) => {
+      const socket =
+        net.createConnection({
+          host: hostname,
+          port,
+        });
 
-    let finished = false;
+      let finished =
+        false;
 
-    const finish = (result: any) => {
-      if (finished) return;
+      const finish = (
+        result: any
+      ) => {
+        if (finished) {
+          return;
+        }
 
-      finished = true;
+        finished = true;
 
-      try {
-        socket.destroy();
-      } catch {
-        // ignore
-      }
+        try {
+          socket.destroy();
+        } catch {
+          // ignore
+        }
 
-      resolve({
-        hostname,
-        port,
-        ms: Date.now() - started,
-        ...result,
-      });
-    };
+        resolve({
+          hostname,
+          port,
 
-    socket.setTimeout(timeout);
+          ms:
+            Date.now() -
+            started,
 
-    socket.once("connect", () => {
-      finish({
-        ok: true,
-        result: "CONNECTED",
-      });
-    });
+          ...result,
+        });
+      };
 
-    socket.once("timeout", () => {
-      finish({
-        ok: false,
-        result: "TIMEOUT",
-      });
-    });
+      socket.setTimeout(
+        timeout
+      );
 
-    socket.once("error", (err: any) => {
-      finish({
-        ok: false,
-        result: "ERROR",
-        error: {
-          code: err?.code || null,
-          message: err?.message || null,
-        },
-      });
-    });
-  });
+      socket.once(
+        "connect",
+        () => {
+          finish({
+            ok: true,
+            result:
+              "CONNECTED",
+          });
+        }
+      );
+
+      socket.once(
+        "timeout",
+        () => {
+          finish({
+            ok: false,
+            result:
+              "TIMEOUT",
+          });
+        }
+      );
+
+      socket.once(
+        "error",
+        (err: any) => {
+          finish({
+            ok: false,
+            result:
+              "ERROR",
+
+            error: {
+              code:
+                err?.code ||
+                null,
+
+              message:
+                err?.message ||
+                null,
+            },
+          });
+        }
+      );
+    }
+  );
 }
 
 /* =========================================================
-   PORT TESTS
+   TEST PORTS
 
-   Pour chaque host rencontré :
+   Teste :
    - port réellement demandé
    - 80
    - 443
    - 8080
-
-   Pas de doublons.
 ========================================================= */
 
 async function tcpPortTests(
   hostname: string,
   actualPort: number
 ) {
-  const ports = Array.from(
-    new Set([
-      actualPort,
-      80,
-      443,
-      8080,
-    ])
-  );
+  const ports =
+    Array.from(
+      new Set([
+        actualPort,
+        80,
+        443,
+        8080,
+      ])
+    );
 
-  const results = [];
+  const results: any[] =
+    [];
 
   /*
    * Séquentiel volontairement.
-   * On évite d'ouvrir plusieurs connexions simultanées
-   * vers le fournisseur.
+   * On évite plusieurs connexions
+   * simultanées au fournisseur.
    */
   for (const port of ports) {
-    results.push(
+    const result =
       await tcpTest(
         hostname,
         port
-      )
+      );
+
+    results.push(
+      result
     );
   }
 
@@ -194,40 +254,175 @@ async function tcpPortTests(
    ORIGIN TEST
 ========================================================= */
 
-async function testOrigin(rawUrl: string) {
-  const target = new URL(rawUrl);
+async function testOrigin(
+  rawUrl: string
+) {
+  const target =
+    new URL(rawUrl);
 
-  const started = Date.now();
+  const started =
+    Date.now();
 
   try {
-    const res = await fetch(target.origin, {
-      method: "GET",
+    const res =
+      await fetch(
+        target.origin,
+        {
+          method:
+            "GET",
 
-      headers: {
-        "User-Agent": UA,
-        Accept: "*/*",
-      },
+          headers: {
+            "User-Agent":
+              UA,
 
-      redirect: "manual",
-      cache: "no-store",
+            Accept:
+              "*/*",
+          },
 
-      signal: AbortSignal.timeout(
-        HTTP_TIMEOUT
-      ),
-    });
+          redirect:
+            "manual",
+
+          cache:
+            "no-store",
+
+          signal:
+            AbortSignal.timeout(
+              HTTP_TIMEOUT
+            ),
+        }
+      );
 
     return {
-      ok: true,
-      status: res.status,
-      ms: Date.now() - started,
+      ok:
+        res.ok,
+
+      status:
+        res.status,
+
+      ms:
+        Date.now() -
+        started,
+
       contentType:
-        res.headers.get("content-type"),
+        res.headers.get(
+          "content-type"
+        ),
+
+      server:
+        res.headers.get(
+          "server"
+        ),
     };
   } catch (err: any) {
     return {
       ok: false,
-      ms: Date.now() - started,
-      error: safeError(err),
+
+      ms:
+        Date.now() -
+        started,
+
+      error:
+        safeError(err),
+    };
+  }
+}
+
+/* =========================================================
+   PLAYER API TEST
+========================================================= */
+
+async function testPlayerApi(
+  liveUrl: string,
+  creds: any
+) {
+  const liveParsed =
+    new URL(
+      liveUrl
+    );
+
+  const playerApi =
+    new URL(
+      "/player_api.php",
+      liveParsed.origin
+    );
+
+  playerApi.searchParams.set(
+    "username",
+    String(
+      creds.username
+    )
+  );
+
+  playerApi.searchParams.set(
+    "password",
+    String(
+      creds.password
+    )
+  );
+
+  const started =
+    Date.now();
+
+  try {
+    const res =
+      await fetch(
+        playerApi.toString(),
+        {
+          method:
+            "GET",
+
+          headers: {
+            "User-Agent":
+              "GTV/3.0",
+
+            Accept:
+              "application/json",
+          },
+
+          redirect:
+            "manual",
+
+          cache:
+            "no-store",
+
+          signal:
+            AbortSignal.timeout(
+              HTTP_TIMEOUT
+            ),
+        }
+      );
+
+    return {
+      ok:
+        res.ok,
+
+      status:
+        res.status,
+
+      ms:
+        Date.now() -
+        started,
+
+      contentType:
+        res.headers.get(
+          "content-type"
+        ),
+
+      server:
+        res.headers.get(
+          "server"
+        ),
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+
+      ms:
+        Date.now() -
+        started,
+
+      error:
+        safeError(err),
     };
   }
 }
@@ -239,51 +434,61 @@ async function testOrigin(rawUrl: string) {
 async function followRedirectChain(
   initialUrl: string
 ) {
-  const steps: any[] = [];
+  const steps: any[] =
+    [];
 
-  let currentUrl = initialUrl;
+  let currentUrl =
+    initialUrl;
 
   for (
     let index = 0;
     index <= MAX_REDIRECTS;
     index++
   ) {
+    /* =====================================================
+       TARGET
+    ===================================================== */
+
     const target =
-      safeTarget(currentUrl);
+      safeTarget(
+        currentUrl
+      );
 
     if (!target) {
       steps.push({
-        step: index + 1,
-        ok: false,
-        error: "Invalid URL",
+        step:
+          index + 1,
+
+        ok:
+          false,
+
+        classification:
+          "INVALID_URL",
+
+        error:
+          "Invalid URL",
       });
 
       break;
     }
 
     const port =
-      Number(target.port);
+      Number(
+        target.port
+      );
 
-    /* ==============================
+    /* =====================================================
        DNS
-    ============================== */
+    ===================================================== */
 
     const dnsResult =
       await lookupHost(
         target.hostname
       );
 
-    /* ==============================
-       TCP DU PORT RÉEL
-
-       Important :
-       ici on teste seulement le port
-       réellement utilisé par le flux.
-
-       Les tests 80/443/8080 complets
-       seront faits séparément sur le
-       serveur qui échoue.
-    ============================== */
+    /* =====================================================
+       TCP PORT RÉEL
+    ===================================================== */
 
     const actualTcp =
       await tcpTest(
@@ -291,29 +496,37 @@ async function followRedirectChain(
         port
       );
 
+    /* =====================================================
+       HTTP FETCH
+    ===================================================== */
+
     const started =
       Date.now();
 
     try {
-      /* ==============================
-         HTTP
-      ============================== */
-
       const res =
         await fetch(
           currentUrl,
           {
-            method: "GET",
+            method:
+              "GET",
 
             headers: {
-              "User-Agent": UA,
+              "User-Agent":
+                UA,
 
               Accept:
                 "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
+
+              Connection:
+                "keep-alive",
             },
 
-            redirect: "manual",
-            cache: "no-store",
+            redirect:
+              "manual",
+
+            cache:
+              "no-store",
 
             signal:
               AbortSignal.timeout(
@@ -331,6 +544,31 @@ async function followRedirectChain(
           "location"
         );
 
+      const contentType =
+        res.headers.get(
+          "content-type"
+        );
+
+      const contentLength =
+        res.headers.get(
+          "content-length"
+        );
+
+      const server =
+        res.headers.get(
+          "server"
+        );
+
+      const retryAfter =
+        res.headers.get(
+          "retry-after"
+        );
+
+      const via =
+        res.headers.get(
+          "via"
+        );
+
       const step: any = {
         step:
           index + 1,
@@ -344,7 +582,8 @@ async function followRedirectChain(
           actualTcp,
 
         http: {
-          ok: true,
+          ok:
+            res.ok,
 
           status:
             res.status,
@@ -353,28 +592,46 @@ async function followRedirectChain(
             elapsed,
 
           contentType:
-            res.headers.get(
-              "content-type"
-            ),
+            contentType ||
+            null,
 
           contentLength:
-            res.headers.get(
-              "content-length"
-            ),
+            contentLength ||
+            null,
+
+          headers: {
+            server:
+              server ||
+              null,
+
+            retryAfter:
+              retryAfter ||
+              null,
+
+            via:
+              via ||
+              null,
+          },
         },
 
         redirect:
-          Boolean(location),
+          Boolean(
+            location
+          ),
 
         redirectTarget:
           null,
       };
 
-      /* ==============================
-         REDIRECT
-      ============================== */
+      /* ===================================================
+         REDIRECT 3XX
+      =================================================== */
 
-      if (location) {
+      if (
+        location &&
+        res.status >= 300 &&
+        res.status < 400
+      ) {
         try {
           const nextUrl =
             new URL(
@@ -382,36 +639,111 @@ async function followRedirectChain(
               currentUrl
             ).toString();
 
+          step.classification =
+            "REDIRECT";
+
           step.redirectTarget =
             safeTarget(
               nextUrl
             );
 
-          steps.push(step);
+          steps.push(
+            step
+          );
 
+          /*
+           * L'URL complète reste
+           * uniquement côté serveur.
+           */
           currentUrl =
             nextUrl;
 
           continue;
         } catch {
+          step.classification =
+            "INVALID_REDIRECT";
+
           step.redirectError =
             "Invalid redirect URL";
 
-          steps.push(step);
+          steps.push(
+            step
+          );
 
           break;
         }
       }
 
-      /* ==============================
-         FINAL RESPONSE
-      ============================== */
+      /* ===================================================
+         HTTP ERROR 4XX / 5XX
+
+         Exemple :
+         asmr4k.pro → 503
+      =================================================== */
+
+      if (!res.ok) {
+        let bodyInfo:
+          any = null;
+
+        try {
+          const body =
+            await res.text();
+
+          bodyInfo = {
+            bytes:
+              Buffer.byteLength(
+                body,
+                "utf8"
+              ),
+
+            isM3U8:
+              body.includes(
+                "#EXTM3U"
+              ),
+
+            /*
+             * Le contenu réel
+             * n'est jamais retourné.
+             */
+            bodyExposed:
+              false,
+          };
+        } catch (
+          err: any
+        ) {
+          bodyInfo = {
+            readError:
+              safeError(
+                err
+              ),
+          };
+        }
+
+        step.classification =
+          "UPSTREAM_HTTP_ERROR";
+
+        step.body =
+          bodyInfo;
+
+        steps.push(
+          step
+        );
+
+        break;
+      }
+
+      /* ===================================================
+         HTTP 2XX
+      =================================================== */
+
+      let bodyInfo:
+        any = null;
 
       try {
         const body =
           await res.text();
 
-        step.body = {
+        bodyInfo = {
           bytes:
             Buffer.byteLength(
               body,
@@ -433,24 +765,55 @@ async function followRedirectChain(
               "#EXT-X-STREAM-INF"
             ),
         };
-      } catch (err: any) {
-        step.body = {
+      } catch (
+        err: any
+      ) {
+        bodyInfo = {
           readError:
-            safeError(err),
+            safeError(
+              err
+            ),
         };
       }
 
-      steps.push(step);
+      step.body =
+        bodyInfo;
+
+      if (
+        bodyInfo?.isM3U8
+      ) {
+        step.classification =
+          "HLS_PLAYLIST_OK";
+      } else {
+        step.classification =
+          "HTTP_OK_NOT_HLS";
+      }
+
+      steps.push(
+        step
+      );
 
       break;
-    } catch (err: any) {
-      /*
-       * HTTP a échoué.
-       *
-       * C'est ici qu'on lance les tests
-       * supplémentaires 80/443/8080.
-       */
+    } catch (
+      err: any
+    ) {
+      /* ===================================================
+         FETCH FAILURE
 
+         Exemple :
+         217.60.253.48:8080
+         UND_ERR_CONNECT_TIMEOUT
+      =================================================== */
+
+      const causeCode =
+        err?.cause?.code ||
+        err?.code ||
+        null;
+
+      /*
+       * Seulement maintenant on teste
+       * les ports alternatifs.
+       */
       const portTests =
         await tcpPortTests(
           target.hostname,
@@ -469,15 +832,24 @@ async function followRedirectChain(
         tcp:
           actualTcp,
 
+        classification:
+          causeCode ===
+          "UND_ERR_CONNECT_TIMEOUT"
+            ? "UPSTREAM_CONNECT_TIMEOUT"
+            : "UPSTREAM_FETCH_ERROR",
+
         http: {
-          ok: false,
+          ok:
+            false,
 
           ms:
             Date.now() -
             started,
 
           error:
-            safeError(err),
+            safeError(
+              err
+            ),
         },
 
         diagnosticPortTests:
@@ -492,7 +864,7 @@ async function followRedirectChain(
 }
 
 /* =========================================================
-   ROUTE
+   MAIN ROUTE
 ========================================================= */
 
 export async function GET(
@@ -510,12 +882,15 @@ export async function GET(
   } catch {
     return Response.json(
       {
-        ok: false,
+        ok:
+          false,
+
         error:
           "Not authenticated",
       },
       {
-        status: 401,
+        status:
+          401,
 
         headers: {
           "Cache-Control":
@@ -525,23 +900,34 @@ export async function GET(
     );
   }
 
+  /* =======================================================
+     STREAM ID
+  ======================================================= */
+
   const {
     searchParams,
   } =
-    new URL(req.url);
+    new URL(
+      req.url
+    );
 
   const id =
-    searchParams.get("id");
+    searchParams.get(
+      "id"
+    );
 
   if (!id) {
     return Response.json(
       {
-        ok: false,
+        ok:
+          false,
+
         error:
           "Missing stream id",
       },
       {
-        status: 400,
+        status:
+          400,
 
         headers: {
           "Cache-Control":
@@ -569,15 +955,25 @@ export async function GET(
         liveUrl
       );
 
-    if (!initialTarget) {
+    if (
+      !initialTarget
+    ) {
       return Response.json(
         {
-          ok: false,
+          ok:
+            false,
+
           error:
             "Invalid Live URL",
         },
         {
-          status: 500,
+          status:
+            500,
+
+          headers: {
+            "Cache-Control":
+              "no-store",
+          },
         }
       );
     }
@@ -598,13 +994,14 @@ export async function GET(
     const initialTcp =
       await tcpTest(
         initialTarget.hostname,
+
         Number(
           initialTarget.port
         )
       );
 
     /* =====================================================
-       ORIGIN
+       ORIGIN TEST
     ===================================================== */
 
     const originTest =
@@ -613,98 +1010,17 @@ export async function GET(
       );
 
     /* =====================================================
-       PLAYER API
+       PLAYER API TEST
     ===================================================== */
 
-    const liveParsed =
-      new URL(
-        liveUrl
+    const playerApiTest =
+      await testPlayerApi(
+        liveUrl,
+        creds
       );
-
-    const playerApi =
-      new URL(
-        "/player_api.php",
-        liveParsed.origin
-      );
-
-    playerApi.searchParams.set(
-      "username",
-      String(
-        creds.username
-      )
-    );
-
-    playerApi.searchParams.set(
-      "password",
-      String(
-        creds.password
-      )
-    );
-
-    const playerStarted =
-      Date.now();
-
-    let playerApiTest:
-      any;
-
-    try {
-      const res =
-        await fetch(
-          playerApi.toString(),
-          {
-            method: "GET",
-
-            headers: {
-              "User-Agent":
-                "GTV/3.0",
-
-              Accept:
-                "application/json",
-            },
-
-            redirect:
-              "manual",
-
-            cache:
-              "no-store",
-
-            signal:
-              AbortSignal.timeout(
-                HTTP_TIMEOUT
-              ),
-          }
-        );
-
-      playerApiTest = {
-        ok: true,
-
-        status:
-          res.status,
-
-        ms:
-          Date.now() -
-          playerStarted,
-
-        contentType:
-          res.headers.get(
-            "content-type"
-          ),
-      };
-    } catch (err: any) {
-      playerApiTest = {
-        ok: false,
-
-        ms:
-          Date.now() -
-          playerStarted,
-
-        error:
-          safeError(err),
-      };
-    }
 
     /* =====================================================
-       REDIRECT CHAIN + TCP
+       FOLLOW LIVE CHAIN
     ===================================================== */
 
     const redirectChain =
@@ -713,23 +1029,111 @@ export async function GET(
       );
 
     /* =====================================================
-       FIND FAILED HOST
+       FIND FAILURE
     ===================================================== */
 
     const failedStep =
       redirectChain.find(
         (step: any) =>
-          step?.http?.ok ===
-          false
+          step?.classification ===
+            "UPSTREAM_HTTP_ERROR" ||
+
+          step?.classification ===
+            "UPSTREAM_CONNECT_TIMEOUT" ||
+
+          step?.classification ===
+            "UPSTREAM_FETCH_ERROR" ||
+
+          step?.classification ===
+            "INVALID_REDIRECT" ||
+
+          step?.classification ===
+            "INVALID_URL"
       );
 
     /* =====================================================
-       RESPONSE
+       HLS SUCCESS
+    ===================================================== */
+
+    const hlsStep =
+      redirectChain.find(
+        (step: any) =>
+          step?.classification ===
+          "HLS_PLAYLIST_OK"
+      );
+
+    /* =====================================================
+       DIAGNOSIS
+    ===================================================== */
+
+    let diagnosis:
+      any;
+
+    if (failedStep) {
+      diagnosis = {
+        classification:
+          failedStep.classification,
+
+        failedAt:
+          failedStep.target ||
+          null,
+
+        httpStatus:
+          failedStep
+            ?.http
+            ?.status ??
+          null,
+
+        tcp:
+          failedStep.tcp ??
+          null,
+
+        portTests:
+          failedStep
+            .diagnosticPortTests ??
+          null,
+      };
+    } else if (hlsStep) {
+      diagnosis = {
+        classification:
+          "HLS_PLAYLIST_OK",
+
+        failedAt:
+          null,
+
+        finalTarget:
+          hlsStep.target,
+
+        httpStatus:
+          hlsStep
+            ?.http
+            ?.status ??
+          200,
+
+        message:
+          "Valid HLS playlist received",
+      };
+    } else {
+      diagnosis = {
+        classification:
+          "NO_NETWORK_FAILURE",
+
+        failedAt:
+          null,
+
+        message:
+          "Redirect chain completed without a classified network failure",
+      };
+    }
+
+    /* =====================================================
+       SAFE RESPONSE
     ===================================================== */
 
     return Response.json(
       {
-        ok: true,
+        ok:
+          true,
 
         streamId:
           id,
@@ -746,27 +1150,7 @@ export async function GET(
 
         redirectChain,
 
-        diagnosis:
-          failedStep
-            ? {
-                failedAt:
-                  failedStep.target,
-
-                tcp:
-                  failedStep.tcp,
-
-                portTests:
-                  failedStep
-                    .diagnosticPortTests ||
-                  null,
-              }
-            : {
-                failedAt:
-                  null,
-
-                message:
-                  "Redirect chain completed without connection failure",
-              },
+        diagnosis,
 
         security: {
           usernameExposed:
@@ -780,7 +1164,8 @@ export async function GET(
         },
       },
       {
-        status: 200,
+        status:
+          200,
 
         headers: {
           "Cache-Control":
@@ -791,16 +1176,22 @@ export async function GET(
         },
       }
     );
-  } catch (err: any) {
+  } catch (
+    err: any
+  ) {
     return Response.json(
       {
-        ok: false,
+        ok:
+          false,
 
         error:
-          safeError(err),
+          safeError(
+            err
+          ),
       },
       {
-        status: 500,
+        status:
+          500,
 
         headers: {
           "Cache-Control":
