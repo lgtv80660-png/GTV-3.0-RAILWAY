@@ -1,134 +1,380 @@
 import { NextResponse } from "next/server";
 
-// Indique à Next.js de ne jamais mettre cette route en cache statique
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type LogoCacheEntry = { expiresAt: number; logoUrl: string | null };
+type LogoCacheEntry = {
+  expiresAt: number;
+  logoUrl: string | null;
+  tmdbId: string | null;
+};
+
 const logoCache = new Map<string, LogoCacheEntry>();
 const LOGO_TTL = 24 * 60 * 60 * 1000;
+
+function cleanMediaTitle(title: string) {
+  return title
+    .replace(/\|.*?\|/g, "")
+    .replace(/\[.*?\]/g, "")
+    .replace(/\(.*?\)/g, "")
+    .replace(/\s*[-|]\s*\b(19|20)\d{2}\b/g, "")
+    .replace(/\b(Saison|Season|S)\s*\d+\b/gi, "")
+    .replace(
+      /\b(2160p|1080p|720p|4k|uhd|fhd|hd|hdr|vostfr|vost|vf|vff|vfi|multi|truefrench|french)\b/gi,
+      ""
+    )
+    .replace(/[-_.]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeYear(value: string | null) {
+  if (!value) return null;
+
+  const match = value.match(/\b(19|20)\d{2}\b/);
+  return match?.[0] || null;
+}
+
+async function getTmdbLogo(
+  type: string,
+  tmdbId: string,
+  key: string
+): Promise<string | null> {
+  try {
+    const url =
+      `https://api.themoviedb.org/3/${type}/${tmdbId}/images` +
+      `?api_key=${key}&include_image_language=fr,en,null`;
+
+    const res = await fetch(url, {
+      next: { revalidate: 86400 },
+      signal: AbortSignal.timeout(7000),
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    const logos = Array.isArray(data?.logos) ? data.logos : [];
+
+    if (!logos.length) return null;
+
+    const best =
+      logos.find((logo: any) => logo.iso_639_1 === "fr") ||
+      logos.find((logo: any) => logo.iso_639_1 === "en") ||
+      logos[0];
+
+    return best?.file_path
+      ? `https://image.tmdb.org/t/p/w500${best.file_path}`
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function searchTmdb(
+  type: string,
+  title: string,
+  year: string | null,
+  key: string
+): Promise<string | null> {
+  try {
+    const url = new URL(
+      `https://api.themoviedb.org/3/search/${type}`
+    );
+
+    url.searchParams.set("api_key", key);
+    url.searchParams.set("query", title);
+    url.searchParams.set("language", "fr-FR");
+
+    // TMDB utilise year pour movie et first_air_date_year pour tv.
+    if (year) {
+      if (type === "movie") {
+        url.searchParams.set("year", year);
+      } else {
+        url.searchParams.set("first_air_date_year", year);
+      }
+    }
+
+    const res = await fetch(url.toString(), {
+      next: { revalidate: 86400 },
+      signal: AbortSignal.timeout(7000),
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    const results = Array.isArray(data?.results)
+      ? data.results
+      : [];
+
+    if (!results.length) return null;
+
+    /*
+      Si l'année est disponible, on privilégie explicitement
+      un résultat correspondant à cette année.
+    */
+    let best = results[0];
+
+    if (year) {
+      const exactYear = results.find((item: any) => {
+        const date =
+          type === "movie"
+            ? item?.release_date
+            : item?.first_air_date;
+
+        return String(date || "").startsWith(year);
+      });
+
+      if (exactYear) {
+        best = exactYear;
+      }
+    }
+
+    return best?.id ? String(best.id) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getFanartLogo(
+  type: string,
+  tmdbId: string,
+  tmdbKey: string,
+  fanartKey: string
+): Promise<string | null> {
+  try {
+    let fanartQueryId = tmdbId;
+
+    /*
+      Fanart movie => TMDB ID
+      Fanart TV    => TVDB ID
+    */
+    if (type === "tv") {
+      const extRes = await fetch(
+        `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${tmdbKey}`,
+        {
+          next: { revalidate: 86400 },
+          signal: AbortSignal.timeout(7000),
+        }
+      );
+
+      if (!extRes.ok) return null;
+
+      const extData = await extRes.json();
+
+      if (!extData?.tvdb_id) return null;
+
+      fanartQueryId = String(extData.tvdb_id);
+    }
+
+    const fanartUrl =
+      type === "movie"
+        ? `https://webservice.fanart.tv/v3/movies/${fanartQueryId}?api_key=${fanartKey}`
+        : `https://webservice.fanart.tv/v3/tv/${fanartQueryId}?api_key=${fanartKey}`;
+
+    const fanartRes = await fetch(fanartUrl, {
+      next: { revalidate: 86400 },
+      signal: AbortSignal.timeout(7000),
+    });
+
+    if (!fanartRes.ok) return null;
+
+    const data = await fanartRes.json();
+
+    const logos =
+      type === "movie"
+        ? [
+            ...(Array.isArray(data?.hdmovielogo)
+              ? data.hdmovielogo
+              : []),
+            ...(Array.isArray(data?.movielogo)
+              ? data.movielogo
+              : []),
+          ]
+        : [
+            ...(Array.isArray(data?.hdtvlogo)
+              ? data.hdtvlogo
+              : []),
+            ...(Array.isArray(data?.clearlogo)
+              ? data.clearlogo
+              : []),
+            ...(Array.isArray(data?.tvlogo)
+              ? data.tvlogo
+              : []),
+          ];
+
+    if (!logos.length) return null;
+
+    const best =
+      logos.find((logo: any) => logo.lang === "fr") ||
+      logos.find((logo: any) => logo.lang === "en") ||
+      logos.find((logo: any) => logo.lang === "00") ||
+      logos[0];
+
+    return best?.url || null;
+  } catch {
+    return null;
+  }
+}
 
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
-    let tmdbId = searchParams.get("tmdbId");
-    let title = searchParams.get("title") || "";
-    const type = searchParams.get("type") || "tv"; 
+
+    const providedTmdbId = searchParams.get("tmdbId");
+    const title = searchParams.get("title") || "";
+    const requestedType = searchParams.get("type") || "tv";
+    const year = normalizeYear(searchParams.get("year"));
+
+    const type =
+      requestedType === "movie"
+        ? "movie"
+        : "tv";
 
     const TMDB_KEY = process.env.TMDB_API_KEY;
     const FANART_KEY = process.env.FANART_API_KEY;
 
-    if (!TMDB_KEY) return NextResponse.json({ logoUrl: null });
-
-    const cacheKey = `${type}|${tmdbId || ""}|${title}`.toLowerCase();
-    const cached = logoCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      return NextResponse.json({ logoUrl: cached.logoUrl }, {
-        headers: { "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400" },
+    if (!TMDB_KEY) {
+      return NextResponse.json({
+        logoUrl: null,
+        tmdbId: null,
       });
     }
 
-    // NETTOYAGE EXTRÊME : Enlève les S01, S1, VF, VOSTFR, 1080p, Multi, 4K, et les points/tirets
-    const cleanTitle = title
-      .replace(/\|.*?\|/g, "")
-      .replace(/\[.*?\]/g, "")
-      .replace(/\(.*?\)/g, "")
-      .replace(/\s*[-|]\s*\b(19|20)\d{2}\b/g, "")
-      .replace(/\b(Saison|Season|S)\s*\d+\b/gi, "")
-      .replace(/\b(1080p|720p|4k|fhd|hd|vostfr|vf|multi)\b/gi, "")
-      .replace(/[-_.]/g, " ") // Remplace les points et tirets par des espaces (ex: Ma.Serie.VF -> Ma Serie)
-      .replace(/\s+/g, " ")
-      .trim();
+    const cleanTitle = cleanMediaTitle(title);
 
-    let finalTmdbId = tmdbId;
-    let tmdbLogoUrl = null;
-    let fanartLogoUrl = null;
+    const cacheKey = [
+      type,
+      providedTmdbId || "",
+      cleanTitle,
+      year || "",
+    ]
+      .join("|")
+      .toLowerCase();
 
-    // ÉTAPE 1 : ON TESTE L'ID FOURNI PAR L'IPTV
-    if (finalTmdbId && finalTmdbId !== "0" && finalTmdbId !== "null" && finalTmdbId !== "") {
-      const tmdbImagesUrl = `https://api.themoviedb.org/3/${type}/${finalTmdbId}/images?api_key=${TMDB_KEY}&include_image_language=fr,en,null`;
-      const tmdbRes = await fetch(tmdbImagesUrl, { next: { revalidate: 86400 }, signal: AbortSignal.timeout(7000) });
-      
-      if (tmdbRes.ok) {
-        const data = await tmdbRes.json();
-        if (data.logos && data.logos.length > 0) {
-          const best = data.logos.find((l: any) => l.iso_639_1 === 'fr') || data.logos.find((l: any) => l.iso_639_1 === 'en') || data.logos[0];
-          tmdbLogoUrl = `https://image.tmdb.org/t/p/w500${best.file_path}`;
-        } else {
-          // L'ID est valide MAIS n'a pas de logo ! (Sûrement un faux ID de l'IPTV).
-          // On le jette pour forcer la recherche par le titre purifié.
+    const cached = logoCache.get(cacheKey);
+
+    if (
+      cached &&
+      cached.expiresAt > Date.now()
+    ) {
+      return NextResponse.json(
+        {
+          logoUrl: cached.logoUrl,
+          tmdbId: cached.tmdbId,
+        },
+        {
+          headers: {
+            "Cache-Control":
+              "public, max-age=3600, stale-while-revalidate=86400",
+          },
+        }
+      );
+    }
+
+    let finalTmdbId =
+      providedTmdbId &&
+      providedTmdbId !== "0" &&
+      providedTmdbId !== "null"
+        ? providedTmdbId
+        : null;
+
+    let tmdbLogoUrl: string | null = null;
+
+    /*
+      1. Vérification éventuelle de l'ID fourni.
+
+      IMPORTANT :
+      on ne considère plus "absence de logo" comme preuve
+      que l'ID TMDB est faux.
+    */
+    if (finalTmdbId) {
+      try {
+        const verifyUrl =
+          `https://api.themoviedb.org/3/${type}/${finalTmdbId}` +
+          `?api_key=${TMDB_KEY}`;
+
+        const verifyRes = await fetch(verifyUrl, {
+          next: { revalidate: 86400 },
+          signal: AbortSignal.timeout(7000),
+        });
+
+        if (!verifyRes.ok) {
           finalTmdbId = null;
         }
-      } else {
+      } catch {
         finalTmdbId = null;
       }
     }
 
-    // ÉTAPE 2 : RECHERCHE PAR LE TITRE PURIFIÉ (Si l'ID était mauvais ou vide de logos)
+    /*
+      2. Pas d'ID Xtream fiable :
+         recherche TMDB par titre + année.
+    */
     if (!finalTmdbId && cleanTitle) {
-      const searchUrl = `https://api.themoviedb.org/3/search/${type}?api_key=${TMDB_KEY}&query=${encodeURIComponent(cleanTitle)}`;
-      const searchRes = await fetch(searchUrl, { next: { revalidate: 86400 }, signal: AbortSignal.timeout(7000) });
-      
-      if (searchRes.ok) {
-        const searchData = await searchRes.json();
-        if (searchData.results && searchData.results.length > 0) {
-          finalTmdbId = searchData.results[0].id.toString();
-          
-          // On a trouvé le vrai ID ! On récupère son logo.
-          const tmdbImagesUrl = `https://api.themoviedb.org/3/${type}/${finalTmdbId}/images?api_key=${TMDB_KEY}&include_image_language=fr,en,null`;
-          const tmdbRes2 = await fetch(tmdbImagesUrl, { next: { revalidate: 86400 }, signal: AbortSignal.timeout(7000) });
-          if (tmdbRes2.ok) {
-            const data2 = await tmdbRes2.json();
-            if (data2.logos && data2.logos.length > 0) {
-              const best = data2.logos.find((l: any) => l.iso_639_1 === 'fr') || data2.logos.find((l: any) => l.iso_639_1 === 'en') || data2.logos[0];
-              tmdbLogoUrl = `https://image.tmdb.org/t/p/w500${best.file_path}`;
-            }
-          }
-        }
-      }
+      finalTmdbId = await searchTmdb(
+        type,
+        cleanTitle,
+        year,
+        TMDB_KEY
+      );
     }
 
-    // ÉTAPE 3 : ON ESSAIE D'AVOIR LA VERSION HAUTE DÉFINITION SUR FANART
+    /*
+      3. Logo TMDB.
+    */
+    if (finalTmdbId) {
+      tmdbLogoUrl = await getTmdbLogo(
+        type,
+        finalTmdbId,
+        TMDB_KEY
+      );
+    }
+
+    /*
+      4. Fanart.
+    */
+    let fanartLogoUrl: string | null = null;
+
     if (finalTmdbId && FANART_KEY) {
-      let fanartQueryId = finalTmdbId;
-      
-      if (type === "tv") {
-        const extRes = await fetch(`https://api.themoviedb.org/3/tv/${finalTmdbId}/external_ids?api_key=${TMDB_KEY}`, { next: { revalidate: 86400 }, signal: AbortSignal.timeout(7000) });
-        if (extRes.ok) {
-          const extData = await extRes.json();
-          if (extData.tvdb_id) fanartQueryId = extData.tvdb_id.toString();
-        }
-      }
-      
-      try {
-        const fanartUrl = type === "movie" 
-            ? `https://webservice.fanart.tv/v3/movies/${fanartQueryId}?api_key=${FANART_KEY}` 
-            : `https://webservice.fanart.tv/v3/tv/${fanartQueryId}?api_key=${FANART_KEY}`;
-        
-        const fanartRes = await fetch(fanartUrl, { next: { revalidate: 86400 }, signal: AbortSignal.timeout(7000) });
-        if (fanartRes.ok) {
-          const fData = await fanartRes.json();
-          const logos = type === "movie" 
-              ? (fData.hdmovielogo || fData.movielogo || []) 
-              : (fData.hdtvlogo || fData.clearlogo || []);
-              
-          if (logos.length > 0) {
-            const best = logos.find((l: any) => l.lang === 'fr') || logos.find((l: any) => l.lang === 'en') || logos[0];
-            if (best?.url) fanartLogoUrl = best.url;
-          }
-        }
-      } catch (e) {
-        // Erreur silencieuse pour Fanart, on se rabattra sur TMDB
-      }
+      fanartLogoUrl = await getFanartLogo(
+        type,
+        finalTmdbId,
+        TMDB_KEY,
+        FANART_KEY
+      );
     }
 
-    // RÉSULTAT : On donne Fanart (1er choix), TMDB (2ème choix), ou null (Texte par défaut)
-    const logoUrl = fanartLogoUrl || tmdbLogoUrl || null;
-    logoCache.set(cacheKey, { expiresAt: Date.now() + LOGO_TTL, logoUrl });
-    return NextResponse.json({ logoUrl }, {
-      headers: { "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400" },
+    const logoUrl =
+      fanartLogoUrl ||
+      tmdbLogoUrl ||
+      null;
+
+    logoCache.set(cacheKey, {
+      expiresAt: Date.now() + LOGO_TTL,
+      logoUrl,
+      tmdbId: finalTmdbId,
     });
-    
+
+    return NextResponse.json(
+      {
+        logoUrl,
+
+        // IMPORTANT POUR LE HERO
+        tmdbId: finalTmdbId,
+      },
+      {
+        headers: {
+          "Cache-Control":
+            "public, max-age=3600, stale-while-revalidate=86400",
+        },
+      }
+    );
   } catch (error) {
-    return NextResponse.json({ logoUrl: null });
+    console.error("[title-logo]", error);
+
+    return NextResponse.json({
+      logoUrl: null,
+      tmdbId: null,
+    });
   }
 }
