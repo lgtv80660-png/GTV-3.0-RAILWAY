@@ -3,298 +3,168 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const TMDB_BASE = "https://api.themoviedb.org/3";
-const TMDB_IMAGE_ORIGINAL = "https://image.tmdb.org/t/p/original";
-const FANART_BASE = "https://webservice.fanart.tv/v3";
+const TMDB = "https://api.themoviedb.org/3";
+const TMDB_IMG = "https://image.tmdb.org/t/p/original";
+const FANART = "https://webservice.fanart.tv/v3.2";
 
-function pickBest(items?: any[]) {
-  if (!Array.isArray(items) || items.length === 0) {
-    return null;
-  }
+type Art = {
+  url?: string;
+  lang?: string;
+  likes?: string | number;
+  width?: string | number;
+  height?: string | number;
+};
 
-  return [...items]
-    .sort(
-      (a, b) =>
-        Number(b?.likes || 0) -
-        Number(a?.likes || 0)
-    )[0]?.url || null;
+type TmdbImage = {
+  file_path?: string;
+  vote_average?: number;
+  vote_count?: number;
+  width?: number;
+  height?: number;
+  iso_639_1?: string | null;
+};
+
+function tmdbImage(path?: string | null) {
+  return path ? `${TMDB_IMG}${path}` : null;
 }
 
-function pickLocalized(items?: any[]) {
-  if (!Array.isArray(items) || items.length === 0) {
-    return null;
-  }
+function scoreFanart(item: Art) {
+  const lang = String(item.lang || "").toLowerCase();
+  const languageBoost = lang === "fr" ? 300 : lang === "en" ? 200 : lang === "00" ? 100 : 0;
+  return languageBoost + Number(item.likes || 0);
+}
 
-  const sorted = [...items].sort(
-    (a, b) =>
-      Number(b?.likes || 0) -
-      Number(a?.likes || 0)
-  );
+function bestFanart(items?: Art[]) {
+  return [...(items || [])]
+    .filter((item) => /^https?:\/\//i.test(String(item?.url || "")))
+    .sort((a, b) => scoreFanart(b) - scoreFanart(a))[0]?.url || null;
+}
 
-  return (
-    sorted.find((item) => item?.lang === "fr")?.url ||
-    sorted.find((item) => item?.lang === "en")?.url ||
-    sorted.find((item) => !item?.lang)?.url ||
-    sorted[0]?.url ||
-    null
-  );
+function scoreTmdb(item: TmdbImage) {
+  const ratio = item.width && item.height ? item.width / item.height : 0;
+  const landscapeBoost = ratio >= 1.5 ? 100 : 0;
+  return landscapeBoost + Number(item.vote_average || 0) * 10 + Math.min(Number(item.vote_count || 0), 100);
+}
+
+function tmdbList(items?: TmdbImage[], limit = 8) {
+  return [...(items || [])]
+    .filter((item) => item?.file_path)
+    .sort((a, b) => scoreTmdb(b) - scoreTmdb(a))
+    .map((item) => tmdbImage(item.file_path))
+    .filter((url): url is string => Boolean(url))
+    .filter((url, index, all) => all.indexOf(url) === index)
+    .slice(0, limit);
 }
 
 export async function GET(req: NextRequest) {
-  const tmdbId =
-    req.nextUrl.searchParams.get("tmdbId");
+  const tmdbId = req.nextUrl.searchParams.get("tmdbId");
 
   if (!tmdbId) {
-    return NextResponse.json(
-      { error: "Missing tmdbId" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Missing tmdbId" }, { status: 400 });
   }
 
-  const tmdbApiKey =
-    process.env.TMDB_API_KEY;
+  const tmdbKey = process.env.TMDB_API_KEY;
+  const fanartKey = process.env.FANART_API_KEY;
 
-  const fanartApiKey =
-    process.env.FANART_API_KEY;
-
-  if (!tmdbApiKey) {
+  if (!tmdbKey) {
     return NextResponse.json(
-      {
-        error: "TMDB_API_KEY missing",
-      },
-      {
-        status: 500,
-      }
+      { error: "TMDB_API_KEY is not configured" },
+      { status: 500 }
     );
   }
 
   try {
-    /* ==========================================
-       TMDB
-    ========================================== */
+    const detailsUrl =
+      `${TMDB}/movie/${encodeURIComponent(tmdbId)}` +
+      `?api_key=${encodeURIComponent(tmdbKey)}&language=fr-FR`;
 
-    const [movieRes, imagesRes] =
-      await Promise.all([
-        fetch(
-          `${TMDB_BASE}/movie/${encodeURIComponent(
-            tmdbId
-          )}?api_key=${tmdbApiKey}&language=fr-FR`,
-          {
-            next: {
-              revalidate: 86400,
-            },
-          }
-        ),
+    const imagesUrl =
+      `${TMDB}/movie/${encodeURIComponent(tmdbId)}/images` +
+      `?api_key=${encodeURIComponent(tmdbKey)}&include_image_language=fr,en,null`;
 
-        fetch(
-          `${TMDB_BASE}/movie/${encodeURIComponent(
-            tmdbId
-          )}/images?api_key=${tmdbApiKey}&include_image_language=fr,en,null`,
-          {
-            next: {
-              revalidate: 86400,
-            },
-          }
-        ),
-      ]);
+    const fanartUrl = fanartKey
+      ? `${FANART}/movies/${encodeURIComponent(tmdbId)}?api_key=${encodeURIComponent(fanartKey)}`
+      : null;
 
-    if (!movieRes.ok) {
+    const [detailsRes, imagesRes, fanartRes] = await Promise.all([
+      fetch(detailsUrl, { next: { revalidate: 86400 } }),
+      fetch(imagesUrl, { next: { revalidate: 86400 } }),
+      fanartUrl
+        ? fetch(fanartUrl, { next: { revalidate: 86400 } }).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    if (!detailsRes.ok) {
       return NextResponse.json(
-        {
-          error: "TMDB failed",
-        },
-        {
-          status: movieRes.status,
-        }
+        { error: "TMDB failed" },
+        { status: detailsRes.status }
       );
     }
 
-    const movieData =
-      await movieRes.json();
+    const details = await detailsRes.json();
+    const images = imagesRes.ok ? await imagesRes.json() : {};
+    const fanart =
+      fanartRes?.ok ? await fanartRes.json().catch(() => ({})) : {};
 
-    const imagesData =
-      imagesRes.ok
-        ? await imagesRes.json()
-        : {};
-
-    /* ==========================================
-       TMDB FALLBACKS
-    ========================================== */
-
-    const tmdbBackdrop =
-      movieData?.backdrop_path
-        ? `${TMDB_IMAGE_ORIGINAL}${movieData.backdrop_path}`
-        : null;
-
-    const tmdbPoster =
-      movieData?.poster_path
-        ? `${TMDB_IMAGE_ORIGINAL}${movieData.poster_path}`
-        : null;
-
-    const tmdbLogoPath =
-      Array.isArray(imagesData?.logos)
-        ? [...imagesData.logos].sort(
-            (a: any, b: any) =>
-              Number(b?.vote_average || 0) -
-              Number(a?.vote_average || 0)
-          )[0]?.file_path
-        : null;
-
-    const tmdbLogo =
-      tmdbLogoPath
-        ? `${TMDB_IMAGE_ORIGINAL}${tmdbLogoPath}`
-        : null;
-
-    /* ==========================================
-       FANART.TV
-
-       Si aucune clé Fanart :
-       on continue normalement avec TMDB.
-    ========================================== */
-
-    if (!fanartApiKey) {
-      return NextResponse.json({
-        tmdbId: Number(tmdbId),
-
-        logo: tmdbLogo,
-
-        poster: tmdbPoster,
-
-        backdrop: tmdbBackdrop,
-
-        source: {
-          fanart: false,
-          tmdb: true,
-        },
-      });
-    }
-
-    let fanart: any = null;
-
-    try {
-      const fanartRes =
-        await fetch(
-          `${FANART_BASE}/movies/${encodeURIComponent(
-            tmdbId
-          )}?api_key=${encodeURIComponent(
-            fanartApiKey
-          )}`,
-          {
-            next: {
-              revalidate: 86400,
-            },
-          }
-        );
-
-      if (fanartRes.ok) {
-        fanart =
-          await fanartRes.json();
-      }
-    } catch {
-      fanart = null;
-    }
-
-    /* ==========================================
-       FANART WALLPAPER
-    ========================================== */
-
-    const fanartBackdrop =
-      pickBest(
-        fanart?.moviebackground
-      );
-
-    /* ==========================================
-       FANART LOGO
-    ========================================== */
-
+    const fanartBackdrop = bestFanart(fanart?.moviebackground);
     const fanartLogo =
-      pickLocalized(
-        fanart?.hdmovielogo
-      ) ||
-      pickLocalized(
-        fanart?.movielogo
-      );
+      bestFanart(fanart?.hdmovielogo) ||
+      bestFanart(fanart?.movielogo);
+    const fanartPoster = bestFanart(fanart?.movieposter);
 
-    /* ==========================================
-       FANART POSTER
-    ========================================== */
+    const tmdbBackdrops = tmdbList(images?.backdrops, 10);
+    const tmdbLogos = tmdbList(images?.logos, 6);
+    const tmdbPosters = tmdbList(images?.posters, 8);
 
-    const fanartPoster =
-      pickLocalized(
-        fanart?.movieposter
-      );
+    const primaryTmdbBackdrop = tmdbImage(details?.backdrop_path);
+    const primaryTmdbPoster = tmdbImage(details?.poster_path);
 
-    /* ==========================================
-       FINAL PRIORITY
-
-       FANART > TMDB
-    ========================================== */
-
-    const backdrop =
-      fanartBackdrop ||
-      tmdbBackdrop;
-
-    const logo =
-      fanartLogo ||
-      tmdbLogo;
-
-    const poster =
-      fanartPoster ||
-      tmdbPoster;
-
-    return NextResponse.json({
-      tmdbId:
-        Number(tmdbId),
-
-      logo,
-
-      poster,
-
-      backdrop,
-
-      source: {
-        fanart:
-          Boolean(fanart),
-
-        backdrop:
-          fanartBackdrop
-            ? "fanart"
-            : tmdbBackdrop
-              ? "tmdb"
-              : null,
-
-        logo:
-          fanartLogo
-            ? "fanart"
-            : tmdbLogo
-              ? "tmdb"
-              : null,
-
-        poster:
-          fanartPoster
-            ? "fanart"
-            : tmdbPoster
-              ? "tmdb"
-              : null,
-      },
-    });
-  } catch (error) {
-    console.error(
-      "[GTV FANART MOVIE]",
-      error
+    const backdrops = [
+      fanartBackdrop,
+      ...tmdbBackdrops,
+      primaryTmdbBackdrop,
+    ].filter((url, index, all): url is string =>
+      Boolean(url) && all.indexOf(url) === index
     );
+
+    const logo = fanartLogo || tmdbLogos[0] || null;
+    const poster = fanartPoster || tmdbPosters[0] || primaryTmdbPoster || null;
+    const backdrop = backdrops[0] || null;
 
     return NextResponse.json(
       {
-        logo: null,
-        poster: null,
-        backdrop: null,
-        error:
-          "Unable to load movie artwork",
+        tmdbId,
+        logo,
+        poster,
+        backdrop,
+        backdrops,
+        source: {
+          fanart: Boolean(fanartRes?.ok),
+          backdrop: fanartBackdrop
+            ? "fanart"
+            : tmdbBackdrops[0]
+              ? "tmdb-images"
+              : primaryTmdbBackdrop
+                ? "tmdb"
+                : null,
+          logo: fanartLogo ? "fanart" : tmdbLogos[0] ? "tmdb-images" : null,
+          poster: fanartPoster
+            ? "fanart"
+            : tmdbPosters[0]
+              ? "tmdb-images"
+              : primaryTmdbPoster
+                ? "tmdb"
+                : null,
+        },
       },
       {
-        status: 200,
+        headers: {
+          "Cache-Control": "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800",
+        },
       }
     );
+  } catch (error) {
+    console.error("[fanart/movie]", error);
+    return NextResponse.json({ error: "Artwork unavailable" }, { status: 502 });
   }
 }
