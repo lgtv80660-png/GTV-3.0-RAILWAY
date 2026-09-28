@@ -34,7 +34,6 @@ export async function GET(req: Request) {
     });
   }
 
-  // IMPORTANT : le Live fonctionnel utilisait m3u8
   const upstreamUrl = buildStreamUrl(
     creds,
     "live",
@@ -50,6 +49,7 @@ export async function GET(req: Request) {
       },
       redirect: "follow",
       cache: "no-store",
+      signal: AbortSignal.timeout(12000),
     });
 
     if (!upstreamRes.ok) {
@@ -64,60 +64,61 @@ export async function GET(req: Request) {
       );
     }
 
-    const playlist = await upstreamRes.text();
+    const playlistText =
+      await upstreamRes.text();
 
-    if (!playlist) {
+    if (!playlistText) {
       return new Response(
         "HLS Proxy Error: empty playlist",
-        {
-          status: 502,
-        }
+        { status: 502 }
       );
     }
 
-    const baseUrl =
+    const base =
       upstreamRes.url || upstreamUrl;
 
-    const rewritten = playlist.replace(
-      /^(?!#)(.+)$/gm,
-      (line) => {
-        const trimmed = line.trim();
+    const rewritten =
+      playlistText.replace(
+        /^(?!#)(.+)$/gm,
+        (line) => {
+          const trimmed = line.trim();
 
-        if (!trimmed) {
-          return line;
+          if (!trimmed) return line;
+
+          try {
+            const absolute =
+              new URL(
+                trimmed,
+                base
+              ).toString();
+
+            return `/api/hlsseg?t=${encodeSegment(
+              absolute
+            )}`;
+          } catch {
+            return line;
+          }
         }
-
-        try {
-          const absolute = new URL(
-            trimmed,
-            baseUrl
-          ).toString();
-
-          const token =
-            encodeSegment(absolute);
-
-          return `/api/hlsseg?t=${token}`;
-        } catch {
-          return line;
-        }
-      }
-    );
+      );
 
     return new Response(rewritten, {
-      status: 200,
       headers: {
         "Content-Type":
-          "application/vnd.apple.mpegurl",
+          "application/vnd.apple.mpegurl; charset=utf-8",
         "Cache-Control":
-          "no-cache, no-store, must-revalidate",
+          "private, no-cache, no-store, must-revalidate",
         "Access-Control-Allow-Origin": "*",
       },
     });
-  } catch (error: any) {
+  } catch (err: any) {
+    const detail =
+      err?.cause?.code ||
+      err?.cause?.message ||
+      err?.message ||
+      "fetch failed";
+
     return new Response(
-      `HLS Proxy Error: ${
-        error?.message || "fetch failed"
-      }`,
+      `HLS Proxy Error: ${detail}`,
       {
         status: 502,
         headers: {
