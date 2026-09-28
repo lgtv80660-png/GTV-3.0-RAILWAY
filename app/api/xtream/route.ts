@@ -18,8 +18,6 @@ function ttlFor(action: string) {
 
 function cacheable(action: string) {
   return [
-    "get_live_categories",
-    "get_live_streams",
     "get_vod_categories",
     "get_vod_streams",
     "get_series_categories",
@@ -40,6 +38,8 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const action = searchParams.get("action") || "";
+    // Live lists always revalidate the provider; the client displays its stale cache.
+    const isLiveList = action === "get_live_categories" || action === "get_live_streams";
     const baseUrl = String(creds?.baseUrl || creds?.url || creds?.serverUrl || "").replace(/\/+$/, "");
     const username = String(creds?.username || creds?.user || "");
     const password = String(creds?.password || creds?.pass || "");
@@ -95,7 +95,7 @@ export async function GET(req: Request) {
     if (cacheable(action)) cache.set(cacheKey, { expiresAt: Date.now() + ttlFor(action), value: data });
 
     return NextResponse.json(data, {
-      headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=180", "x-gtv-cache": "miss" },
+      headers: { "Cache-Control": isLiveList ? "private, no-store" : "private, max-age=30, stale-while-revalidate=180", "x-gtv-cache": "miss" },
     });
   } catch (err: any) {
     return NextResponse.json({ error: err?.message || "Erreur serveur" }, { status: err?.status || 500 });
