@@ -34,11 +34,12 @@ export async function GET(req: Request) {
     });
   }
 
+  // IMPORTANT : le Live fonctionnel utilisait m3u8
   const upstreamUrl = buildStreamUrl(
     creds,
     "live",
     id,
-    "ts"
+    "m3u8"
   );
 
   try {
