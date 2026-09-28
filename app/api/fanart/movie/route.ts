@@ -106,7 +106,9 @@ export async function GET(req: NextRequest) {
     const fanart =
       fanartRes?.ok ? await fanartRes.json().catch(() => ({})) : {};
 
-    const fanartBackdrop = bestFanart(fanart?.moviebackground);
+    const fanart4kBackdrop = bestFanart(fanart?.movie4kbackground);
+    const fanartHdBackdrop = bestFanart(fanart?.moviebackground);
+    const fanartBackdrop = fanart4kBackdrop || fanartHdBackdrop;
     const fanartLogo =
       bestFanart(fanart?.hdmovielogo) ||
       bestFanart(fanart?.movielogo);
@@ -140,8 +142,10 @@ export async function GET(req: NextRequest) {
         backdrops,
         source: {
           fanart: Boolean(fanartRes?.ok),
-          backdrop: fanartBackdrop
-            ? "fanart"
+          backdrop: fanart4kBackdrop
+            ? "fanart-4k"
+            : fanartHdBackdrop
+              ? "fanart-1080p"
             : tmdbBackdrops[0]
               ? "tmdb-images"
               : primaryTmdbBackdrop
