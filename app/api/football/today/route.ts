@@ -1,4 +1,4 @@
-﻿import {
+import {
   NextRequest,
   NextResponse,
 } from "next/server";
@@ -23,25 +23,37 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const LIVE_CACHE_MS =
+  15 * 1000;
+
+const IDLE_CACHE_MS =
+  2 * 60 * 1000;
+
 type SourceResponse = {
   success: boolean;
   fixtures?: FootballFixture[];
   error?: string;
 };
 
+/* =========================================================
+   SOURCE
+   ========================================================= */
+
 async function callSource(
   handler: (
     request: NextRequest
   ) => Promise<Response> | Response,
+
   requestUrl: string
 ): Promise<FootballFixture[]> {
   try {
-    const request = new NextRequest(
-      requestUrl,
-      {
-        method: "GET",
-      }
-    );
+    const request =
+      new NextRequest(
+        requestUrl,
+        {
+          method: "GET",
+        }
+      );
 
     const response =
       await handler(request);
@@ -61,7 +73,9 @@ async function callSource(
 
     if (
       !data.success ||
-      !Array.isArray(data.fixtures)
+      !Array.isArray(
+        data.fixtures
+      )
     ) {
       console.error(
         "[football/today] invalid source response:",
@@ -84,28 +98,44 @@ async function callSource(
   }
 }
 
+/* =========================================================
+   GET
+   ========================================================= */
+
 export async function GET(
   request: NextRequest
 ) {
-  const url = new URL(request.url);
+  const url =
+    new URL(
+      request.url
+    );
 
   const date =
     safeDate(
-      url.searchParams.get("date")
+      url.searchParams.get(
+        "date"
+      )
     );
 
   const timeZone =
     safeTimeZone(
-      url.searchParams.get("timezone")
+      url.searchParams.get(
+        "timezone"
+      )
     );
 
+  /*
+   * v2 volontaire :
+   * abandon immédiat des anciens
+   * caches de 5 minutes.
+   */
   const cacheKey =
-    `football:today:${date}:${timeZone}`;
+    `football:today:v2:${date}:${timeZone}`;
 
   const cached =
-    readCache<FootballFixture[]>(
-      cacheKey
-    );
+    readCache<
+      FootballFixture[]
+    >(cacheKey);
 
   if (
     Array.isArray(cached) &&
@@ -113,21 +143,31 @@ export async function GET(
   ) {
     return NextResponse.json({
       success: true,
+
       cached: true,
+
       date,
-      timezone: timeZone,
+
+      timezone:
+        timeZone,
+
       sources: {
         cached: true,
       },
-      count: cached.length,
-      fixtures: cached,
+
+      count:
+        cached.length,
+
+      fixtures:
+        cached,
     });
   }
 
   const query =
     new URLSearchParams({
       date,
-      timezone: timeZone,
+      timezone:
+        timeZone,
     });
 
   const europeUrl =
@@ -136,20 +176,33 @@ export async function GET(
   const africaUrl =
     `${url.origin}/api/football/africa?${query.toString()}`;
 
-  const [europe, africa] =
+  const [
+    europe,
+    africa,
+  ] =
     await Promise.all([
       callSource(
         getEurope,
         europeUrl
       ),
+
       callSource(
         getAfrica,
         africaUrl
       ),
     ]);
 
+  /*
+   * =======================================================
+   * DEDUPE
+   * =======================================================
+   */
+
   const map =
-    new Map<string, FootballFixture>();
+    new Map<
+      string,
+      FootballFixture
+    >();
 
   for (
     const fixture of [
@@ -158,7 +211,9 @@ export async function GET(
     ]
   ) {
     const key =
-      fixtureKey(fixture);
+      fixtureKey(
+        fixture
+      );
 
     const existing =
       map.get(key);
@@ -172,9 +227,15 @@ export async function GET(
       continue;
     }
 
+    /*
+     * SportSRC reste prioritaire
+     * pour les doublons Afrique.
+     */
     if (
-      fixture.provider === "sportsrc" &&
-      existing.provider !== "sportsrc"
+      fixture.provider ===
+        "sportsrc" &&
+      existing.provider !==
+        "sportsrc"
     ) {
       map.set(
         key,
@@ -189,32 +250,76 @@ export async function GET(
         (
           fixture
         ): fixture is FootballFixture =>
-          Boolean(fixture?.startingAt)
+          Boolean(
+            fixture
+              ?.startingAt
+          )
       )
       .sort(
         (a, b) =>
-          new Date(a.startingAt).getTime() -
-          new Date(b.startingAt).getTime()
+          new Date(
+            a.startingAt
+          ).getTime() -
+          new Date(
+            b.startingAt
+          ).getTime()
       );
 
-  if (fixtures.length > 0) {
+  /*
+   * =======================================================
+   * CACHE
+   * =======================================================
+   *
+   * LIVE :
+   * 15 secondes maximum.
+   *
+   * PAS DE LIVE :
+   * 2 minutes.
+   *
+   * Le frontend peut donc poller toutes
+   * les 30 secondes et obtenir un score
+   * réellement renouvelé.
+   */
+
+  if (
+    fixtures.length > 0
+  ) {
+    const hasLive =
+      fixtures.some(
+        (fixture) =>
+          fixture.status.live
+      );
+
     writeCache(
       cacheKey,
       fixtures,
-      5 * 60 * 1000
+      hasLive
+        ? LIVE_CACHE_MS
+        : IDLE_CACHE_MS
     );
   }
 
   return NextResponse.json({
     success: true,
+
     cached: false,
+
     date,
-    timezone: timeZone,
+
+    timezone:
+      timeZone,
+
     sources: {
-      espn: europe.length,
-      sportsrc: africa.length,
+      espn:
+        europe.length,
+
+      sportsrc:
+        africa.length,
     },
-    count: fixtures.length,
+
+    count:
+      fixtures.length,
+
     fixtures,
   });
 }
