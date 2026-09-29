@@ -19,12 +19,14 @@ export const dynamic = "force-dynamic";
 const SPORTSRC_BASE =
   "https://api.sportsrc.org/v2/";
 
-type AnyObject =
-  Record<string, any>;
+const LIVE_CACHE_MS = 15 * 1000;
+const IDLE_CACHE_MS = 2 * 60 * 1000;
+
+type AnyObject = Record<string, any>;
 
 /* =========================================================
-   ARRAY SAFE
-========================================================= */
+   SAFE ARRAY
+   ========================================================= */
 
 function asArray(
   value: unknown
@@ -41,15 +43,13 @@ function asArray(
 }
 
 /* =========================================================
-   RESOLVE GROUPS
-========================================================= */
+   GROUPS
+   ========================================================= */
 
 function resolveGroups(
   payload: any
 ): AnyObject[] {
-  if (
-    Array.isArray(payload)
-  ) {
+  if (Array.isArray(payload)) {
     return payload;
   }
 
@@ -60,14 +60,8 @@ function resolveGroups(
     payload?.leagues,
   ];
 
-  for (
-    const candidate of candidates
-  ) {
-    if (
-      Array.isArray(
-        candidate
-      )
-    ) {
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
       return candidate;
     }
   }
@@ -76,15 +70,14 @@ function resolveGroups(
 }
 
 /* =========================================================
-   STRICT AFRICA FILTER
-========================================================= */
+   AFRICA FILTER
+   ========================================================= */
 
 function looksAfrican(
   group: AnyObject
 ) {
   const league =
-    group?.league ??
-    group;
+    group?.league ?? group;
 
   const name =
     safeString(
@@ -102,10 +95,6 @@ function looksAfrican(
 
   const text =
     `${name} ${country}`;
-
-  /* =====================================================
-     EXCLUDE OTHER CONFEDERATIONS
-  ===================================================== */
 
   const excluded = [
     "concacaf",
@@ -125,17 +114,11 @@ function looksAfrican(
   if (
     excluded.some(
       (token) =>
-        text.includes(
-          token
-        )
+        text.includes(token)
     )
   ) {
     return false;
   }
-
-  /* =====================================================
-     STRICT CAF / AFRICA NAMES
-  ===================================================== */
 
   const africanCompetitionKeywords = [
     "africa cup of nations",
@@ -153,40 +136,22 @@ function looksAfrican(
   if (
     africanCompetitionKeywords.some(
       (token) =>
-        name.includes(
-          token
-        )
+        name.includes(token)
     )
   ) {
     return true;
   }
 
-  /* =====================================================
-     COUNTRY=AFRICA
-  ===================================================== */
-
-  if (
-    country ===
-    "africa"
-  ) {
+  if (country === "africa") {
     return true;
   }
-
-  /*
-   * Attention :
-   * on ne fait PAS simplement
-   * name.includes("caf")
-   *
-   * parce que ça peut produire
-   * des faux positifs dans certains noms.
-   */
 
   return false;
 }
 
 /* =========================================================
-   TIMESTAMP TO ISO
-========================================================= */
+   TIMESTAMP
+   ========================================================= */
 
 function timestampToIso(
   value: unknown
@@ -194,24 +159,21 @@ function timestampToIso(
   const timestamp =
     safeNumber(value);
 
-  if (!timestamp) {
+  if (
+    timestamp === null ||
+    timestamp === undefined
+  ) {
     return "";
   }
 
-  /*
-   * secondes vs millisecondes
-   */
   const milliseconds =
     timestamp >
     10_000_000_000
       ? timestamp
-      : timestamp *
-        1000;
+      : timestamp * 1000;
 
   const date =
-    new Date(
-      milliseconds
-    );
+    new Date(milliseconds);
 
   if (
     Number.isNaN(
@@ -225,91 +187,105 @@ function timestampToIso(
 }
 
 /* =========================================================
-   NORMALIZE MATCH
-========================================================= */
+   SCORE
+   ========================================================= */
 
-function normalizeMatch(
-  group: AnyObject,
-  match: AnyObject
-): FootballFixture | null {
-  const league =
-    group?.league ??
-    {};
+function numberOrNull(
+  value: unknown
+): number | null {
+  const result =
+    safeNumber(value);
 
-  const matchId =
-    safeString(
-      match?.id
-    );
+  return result === null ||
+    result === undefined
+    ? null
+    : result;
+}
 
-  if (!matchId) {
-    return null;
+function firstNumber(
+  ...values: unknown[]
+): number | null {
+  for (const value of values) {
+    const parsed =
+      numberOrNull(value);
+
+    if (parsed !== null) {
+      return parsed;
+    }
   }
+
+  return null;
+}
+
+function resolveScore(
+  match: AnyObject
+) {
+  /*
+   * SportSRC peut faire évoluer légèrement
+   * la structure de son payload.
+   *
+   * On accepte plusieurs formes sans
+   * inventer de score.
+   */
 
   const home =
-    match?.teams
-      ?.home ??
-    {};
+    firstNumber(
+      match?.score?.current?.home,
+      match?.score?.home,
+      match?.scores?.current?.home,
+      match?.scores?.home,
+      match?.goals?.home,
+      match?.result?.home,
+      match?.home_score,
+      match?.homeScore
+    );
 
   const away =
-    match?.teams
-      ?.away ??
-    {};
-
-  /* =====================================================
-     START TIME
-  ===================================================== */
-
-  let startingAt =
-    timestampToIso(
-      match?.timestamp
+    firstNumber(
+      match?.score?.current?.away,
+      match?.score?.away,
+      match?.scores?.current?.away,
+      match?.scores?.away,
+      match?.goals?.away,
+      match?.result?.away,
+      match?.away_score,
+      match?.awayScore
     );
 
-  if (
-    !startingAt &&
-    typeof match?.date ===
-      "string"
-  ) {
-    startingAt =
-      match.date;
-  }
-
-  /* =====================================================
-     SCORE
-  ===================================================== */
-
-  const currentScore =
-    match?.score
-      ?.current ??
-    {};
-
-  const homeScore =
-    safeNumber(
-      currentScore?.home
-    );
-
-  const awayScore =
-    safeNumber(
-      currentScore?.away
-    );
-
-  const displayScore =
+  const providerDisplay =
     safeString(
-      match?.score
-        ?.display
+      match?.score?.display
     ) ||
+    safeString(
+      match?.scores?.display
+    ) ||
+    safeString(
+      match?.result?.display
+    );
+
+  const display =
+    providerDisplay ||
     (
-      homeScore !==
-        null &&
-      awayScore !==
-        null
-        ? `${homeScore} - ${awayScore}`
+      home !== null &&
+      away !== null
+        ? `${home} - ${away}`
         : null
     );
 
-  /* =====================================================
-     STATUS
-  ===================================================== */
+  return {
+    home,
+    away,
+    display,
+  };
+}
 
+/* =========================================================
+   STATUS
+   ========================================================= */
+
+function resolveStatus(
+  match: AnyObject
+) {
   const rawStatus =
     safeString(
       match?.status
@@ -320,7 +296,14 @@ function normalizeMatch(
   const statusDetail =
     safeString(
       match?.status_detail
+    ) ||
+    safeString(
+      match?.statusDetail
     );
+
+  const combined =
+    `${rawStatus} ${statusDetail}`
+      .toLowerCase();
 
   const liveStatuses = [
     "live",
@@ -348,22 +331,68 @@ function normalizeMatch(
   const live =
     liveStatuses.some(
       (status) =>
-        rawStatus.includes(
-          status
-        )
+        combined.includes(status)
     );
 
   const finished =
     finishedStatuses.some(
       (status) =>
-        rawStatus.includes(
-          status
-        )
+        combined.includes(status)
     );
 
-  /* =====================================================
-     NORMALIZED FIXTURE
-  ===================================================== */
+  return {
+    rawStatus,
+    statusDetail,
+    live,
+    finished,
+  };
+}
+
+/* =========================================================
+   NORMALIZE MATCH
+   ========================================================= */
+
+function normalizeMatch(
+  group: AnyObject,
+  match: AnyObject
+): FootballFixture | null {
+  const league =
+    group?.league ?? {};
+
+  const matchId =
+    safeString(
+      match?.id
+    );
+
+  if (!matchId) {
+    return null;
+  }
+
+  const home =
+    match?.teams?.home ?? {};
+
+  const away =
+    match?.teams?.away ?? {};
+
+  let startingAt =
+    timestampToIso(
+      match?.timestamp
+    );
+
+  if (
+    !startingAt &&
+    typeof match?.date ===
+      "string"
+  ) {
+    startingAt =
+      match.date;
+  }
+
+  const score =
+    resolveScore(match);
+
+  const status =
+    resolveStatus(match);
 
   return {
     id:
@@ -378,30 +407,30 @@ function normalizeMatch(
     competitionId:
       safeString(
         league?.id
-      ) ||
-      null,
+      ) || null,
 
     startingAt,
 
     status: {
       short:
-        rawStatus,
+        status.rawStatus,
 
       long:
-        statusDetail ||
-        rawStatus,
+        status.statusDetail ||
+        status.rawStatus,
 
-      live,
+      live:
+        status.live,
 
-      finished,
+      finished:
+        status.finished,
     },
 
     league: {
       id:
         safeString(
           league?.id
-        ) ||
-        null,
+        ) || null,
 
       name:
         safeString(
@@ -411,14 +440,12 @@ function normalizeMatch(
       country:
         safeString(
           league?.country
-        ) ||
-        null,
+        ) || null,
 
       logo:
         safeString(
           league?.logo
-        ) ||
-        null,
+        ) || null,
     },
 
     home: {
@@ -441,8 +468,7 @@ function normalizeMatch(
       code:
         safeString(
           home?.code
-        ) ||
-        null,
+        ) || null,
 
       logo:
         safeString(
@@ -474,8 +500,7 @@ function normalizeMatch(
       code:
         safeString(
           away?.code
-        ) ||
-        null,
+        ) || null,
 
       logo:
         safeString(
@@ -489,29 +514,25 @@ function normalizeMatch(
 
     score: {
       home:
-        homeScore,
+        score.home,
 
       away:
-        awayScore,
+        score.away,
 
       display:
-        displayScore,
+        score.display,
     },
   };
 }
 
 /* =========================================================
    GET
-========================================================= */
+   ========================================================= */
 
 export async function GET(
   request: NextRequest
 ) {
   try {
-    /* =====================================================
-       API KEY
-    ===================================================== */
-
     const apiKey =
       process.env
         .SPORTSRC_API_KEY;
@@ -519,25 +540,16 @@ export async function GET(
     if (!apiKey) {
       return NextResponse.json(
         {
-          success:
-            false,
-
+          success: false,
           error:
             "SPORTSRC_API_KEY manquant.",
-
-          fixtures:
-            [],
+          fixtures: [],
         },
         {
-          status:
-            500,
+          status: 500,
         }
       );
     }
-
-    /* =====================================================
-       PARAMS
-    ===================================================== */
 
     const requestUrl =
       new URL(
@@ -558,47 +570,35 @@ export async function GET(
         )
       );
 
-    /* =====================================================
-       CACHE
-
-       v3 dans la clé pour éviter
-       de récupérer l'ancien cache
-       qui contenait CONCACAF.
-    ===================================================== */
-
+    /*
+     * v4 pour abandonner immédiatement
+     * les anciens caches v3 de 15 minutes.
+     */
     const cacheKey =
-      `football:africa:v3:${date}`;
+      `football:africa:v4:${date}`;
 
     const cached =
-      readCache<FootballFixture[]>(
-        cacheKey
-      );
+      readCache<
+        FootballFixture[]
+      >(cacheKey);
 
-    if (cached) {
+    if (
+      Array.isArray(cached)
+    ) {
       return NextResponse.json({
         success: true,
-
         provider:
           "sportsrc",
-
         cached: true,
-
         date,
-
         timezone:
           timeZone,
-
         count:
           cached.length,
-
         fixtures:
           cached,
       });
     }
-
-    /* =====================================================
-       SPORTSRC URL
-    ===================================================== */
 
     const upstream =
       new URL(
@@ -620,10 +620,6 @@ export async function GET(
       date
     );
 
-    /* =====================================================
-       FETCH
-    ===================================================== */
-
     const response =
       await fetch(
         upstream.toString(),
@@ -644,15 +640,10 @@ export async function GET(
     const raw =
       await response.text();
 
-    /* =====================================================
-       HTTP ERROR
-    ===================================================== */
-
     if (!response.ok) {
       return NextResponse.json(
         {
-          success:
-            false,
+          success: false,
 
           error:
             `SportSRC HTTP ${response.status}`,
@@ -663,8 +654,7 @@ export async function GET(
               400
             ),
 
-          fixtures:
-            [],
+          fixtures: [],
         },
         {
           status:
@@ -676,12 +666,7 @@ export async function GET(
       );
     }
 
-    /* =====================================================
-       JSON
-    ===================================================== */
-
-    let payload:
-      any;
+    let payload: any;
 
     try {
       payload =
@@ -689,8 +674,7 @@ export async function GET(
     } catch {
       return NextResponse.json(
         {
-          success:
-            false,
+          success: false,
 
           error:
             "SportSRC a renvoyé une réponse non JSON.",
@@ -701,28 +685,18 @@ export async function GET(
               400
             ),
 
-          fixtures:
-            [],
+          fixtures: [],
         },
         {
-          status:
-            502,
+          status: 502,
         }
       );
     }
-
-    /* =====================================================
-       GROUPS
-    ===================================================== */
 
     const groups =
       resolveGroups(
         payload
       );
-
-    /* =====================================================
-       STRICT AFRICAN GROUPS
-    ===================================================== */
 
     const africanGroups =
       groups.filter(
@@ -731,13 +705,6 @@ export async function GET(
             group
           )
       );
-
-    /* =====================================================
-       DEBUG SERVER
-
-       Très utile tant qu'on valide
-       la couverture SportSRC.
-    ===================================================== */
 
     console.log(
       "[SportSRC] groups received:",
@@ -771,10 +738,6 @@ export async function GET(
       )
     );
 
-    /* =====================================================
-       NORMALIZE
-    ===================================================== */
-
     const fixtures =
       africanGroups
         .flatMap(
@@ -793,22 +756,16 @@ export async function GET(
                 (
                   item
                 ): item is FootballFixture =>
-                  item !==
-                  null
+                  item !== null
               )
         )
         .filter(
           (fixture) =>
-            fixture.home
-              .name &&
-            fixture.away
-              .name
+            fixture.home.name &&
+            fixture.away.name
         )
         .sort(
-          (
-            a,
-            b
-          ) => {
+          (a, b) => {
             const aTime =
               new Date(
                 a.startingAt
@@ -836,37 +793,40 @@ export async function GET(
             }
 
             return (
-              aTime -
-              bTime
+              aTime - bTime
             );
           }
         );
 
-    /* =====================================================
-       CACHE 15 MIN
-    ===================================================== */
+    /*
+     * IMPORTANT :
+     *
+     * S'il existe un match live,
+     * le cache ne dure que 15 secondes.
+     *
+     * Sinon 2 minutes suffisent.
+     */
+    const hasLive =
+      fixtures.some(
+        (fixture) =>
+          fixture.status.live
+      );
 
     writeCache(
       cacheKey,
       fixtures,
-      15 *
-        60 *
-        1000
+      hasLive
+        ? LIVE_CACHE_MS
+        : IDLE_CACHE_MS
     );
 
-    /* =====================================================
-       RESPONSE
-    ===================================================== */
-
     return NextResponse.json({
-      success:
-        true,
+      success: true,
 
       provider:
         "sportsrc",
 
-      cached:
-        false,
+      cached: false,
 
       date,
 
@@ -919,21 +879,17 @@ export async function GET(
 
     return NextResponse.json(
       {
-        success:
-          false,
+        success: false,
 
         error:
-          error instanceof
-          Error
+          error instanceof Error
             ? error.message
             : "SportSRC indisponible.",
 
-        fixtures:
-          [],
+        fixtures: [],
       },
       {
-        status:
-          500,
+        status: 500,
       }
     );
   }
