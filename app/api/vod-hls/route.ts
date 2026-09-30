@@ -23,6 +23,15 @@ const RAILWAY_URL = (
 
 const ROOT = "/tmp/gtv-vod-hls";
 
+/*
+ * Premier segment attendu rapidement.
+ *
+ * 45 secondes donnent suffisamment de marge
+ * pour les hosts Xtream plus lents sans
+ * laisser une requête bloquée indéfiniment.
+ */
+const START_TIMEOUT = 45_000;
+
 const HEADERS = {
   "Cache-Control":
     "no-store, no-cache, must-revalidate",
@@ -59,7 +68,7 @@ async function exists(file: string) {
 
 async function waitForPlaylist(
   playlist: string,
-  timeout = 30_000,
+  timeout = START_TIMEOUT,
 ) {
   const started = Date.now();
 
@@ -84,7 +93,7 @@ async function waitForPlaylist(
     }
 
     await new Promise((resolve) =>
-      setTimeout(resolve, 150),
+      setTimeout(resolve, 100),
     );
   }
 
@@ -94,11 +103,130 @@ async function waitForPlaylist(
 }
 
 /*
- * Réécrit :
+ * Attend soit :
  *
+ * - le premier segment HLS
+ * - la fermeture prématurée de FFmpeg
+ * - le timeout
+ *
+ * Cela évite d'attendre 45 secondes lorsqu'un
+ * FFmpeg a déjà échoué.
+ */
+async function waitForHlsStartup(
+  playlist: string,
+  ff: ReturnType<typeof spawn>,
+  getStderr: () => string,
+  timeout = START_TIMEOUT,
+) {
+  return new Promise<string>(
+    (resolve, reject) => {
+      let finished = false;
+
+      const started = Date.now();
+
+      const finish = (
+        callback: () => void,
+      ) => {
+        if (finished) return;
+
+        finished = true;
+        clearInterval(timer);
+        callback();
+      };
+
+      const timer = setInterval(
+        async () => {
+          if (finished) return;
+
+          if (
+            Date.now() - started >= timeout
+          ) {
+            finish(() =>
+              reject(
+                new Error(
+                  "Timeout génération playlist HLS",
+                ),
+              ),
+            );
+
+            return;
+          }
+
+          if (!(await exists(playlist))) {
+            return;
+          }
+
+          try {
+            const content =
+              await readFile(
+                playlist,
+                "utf8",
+              );
+
+            if (
+              content.includes("#EXTM3U") &&
+              content.includes("#EXTINF")
+            ) {
+              finish(() =>
+                resolve(content),
+              );
+            }
+          } catch {}
+        },
+        100,
+      );
+
+      timer.unref?.();
+
+      ff.once(
+        "error",
+        (error) => {
+          finish(() =>
+            reject(
+              new Error(
+                `FFmpeg impossible à démarrer: ${error.message}`,
+              ),
+            ),
+          );
+        },
+      );
+
+      ff.once(
+        "close",
+        (code, signal) => {
+          if (finished) return;
+
+          const details =
+            getStderr()
+              .trim()
+              .slice(-5000);
+
+          finish(() =>
+            reject(
+              new Error(
+                [
+                  "FFmpeg fermé avant création HLS.",
+                  `code=${code ?? "null"}`,
+                  `signal=${signal ?? "null"}`,
+                  details
+                    ? `stderr=${details}`
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" "),
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+
+/*
  * seg-000001.ts
  *
- * vers :
+ * devient :
  *
  * /api/vod-hls-seg?s=SESSION&f=seg-000001.ts
  */
@@ -128,11 +256,6 @@ function rewriteManifest(
   );
 }
 
-/*
- * ============================================================
- * GET
- * ============================================================
- */
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -145,10 +268,6 @@ export async function GET(req: Request) {
      * Safari recharge une session HLS existante.
      *
      * /api/vod-hls?s=SESSION
-     *
-     * IMPORTANT :
-     * on ne démarre PAS un nouveau FFmpeg.
-     * On relit le index.m3u8 de la même session.
      * ========================================================
      */
 
@@ -183,13 +302,6 @@ export async function GET(req: Request) {
         "index.m3u8",
       );
 
-      /*
-       * Safari peut demander le manifest
-       * pendant que FFmpeg est en train
-       * d'écrire le prochain segment.
-       *
-       * On attend légèrement si nécessaire.
-       */
       let manifest: string;
 
       try {
@@ -243,7 +355,7 @@ export async function GET(req: Request) {
      * ========================================================
      * MODE 2
      *
-     * Création d'une nouvelle session.
+     * Nouvelle session.
      * ========================================================
      */
 
@@ -291,9 +403,6 @@ export async function GET(req: Request) {
      * ========================================================
      * Premier appel :
      * application / Cloudflare
-     *
-     * On récupère la session Xtream,
-     * puis on redirige vers Railway.
      * ========================================================
      */
 
@@ -470,7 +579,7 @@ export async function GET(req: Request) {
 
     /*
      * ========================================================
-     * Création session HLS.
+     * Session HLS.
      * ========================================================
      */
 
@@ -506,17 +615,27 @@ export async function GET(req: Request) {
 
     /*
      * ========================================================
-     * FFmpeg
+     * FFmpeg Apple HLS
      *
-     * Le but :
+     * IMPORTANT :
      *
-     * Xtream
-     *    ↓
-     * H264 + AAC
-     *    ↓
-     * MPEG-TS HLS
-     *    ↓
-     * Safari / iPhone
+     * - H264
+     * - AAC
+     * - yuv420p
+     * - maximum 1080p
+     * - aucun upscale
+     * - preset ultrafast
+     * - segments 2 secondes
+     *
+     * Le scale :
+     *
+     * 3840x2160 -> 1920x1080
+     * 2560x1440 -> 1920x1080
+     * 1920x1080 -> 1920x1080
+     * 1280x720  -> 1280x720
+     *
+     * force_original_aspect_ratio=decrease
+     * empêche l'upscale.
      * ========================================================
      */
 
@@ -552,11 +671,16 @@ export async function GET(req: Request) {
       "-fflags",
       "+genpts+discardcorrupt",
 
+      /*
+       * Certains MKV demandent davantage
+       * d'analyse avant de trouver correctement
+       * vidéo + audio.
+       */
       "-analyzeduration",
-      "5000000",
+      "10000000",
 
       "-probesize",
-      "5000000",
+      "10000000",
 
       /*
        * Resume.
@@ -572,69 +696,82 @@ export async function GET(req: Request) {
       inputUrl,
 
       /*
-       * Première vidéo.
+       * Uniquement première vidéo + premier audio.
+       *
+       * Pas de subtitles.
+       * Pas d'attachments MKV.
        */
       "-map",
       "0:v:0?",
 
-      /*
-       * Premier audio.
-       */
       "-map",
       "0:a:0?",
 
       /*
        * ======================================================
-       * VIDEO APPLE
-       *
-       * PAS de -c:v copy.
-       *
-       * Dolby Vision / HEVC / MKV /
-       * profils non compatibles Safari
-       * deviennent H264.
+       * VIDEO
        * ======================================================
        */
+
       "-c:v",
       "libx264",
 
       /*
-       * Railway :
-       * superfast réduit fortement
-       * la charge CPU par rapport
-       * à veryfast.
+       * Priorité à la vitesse CPU Railway.
        */
       "-preset",
-      "superfast",
+      "ultrafast",
 
+      /*
+       * H264 très compatible Apple.
+       */
       "-profile:v",
-      "high",
+      "main",
 
-      "-level",
+      "-level:v",
       "4.1",
 
       "-pix_fmt",
       "yuv420p",
 
       /*
-       * Qualité.
+       * Maximum 1920x1080.
+       *
+       * Pas d'upscale.
+       *
+       * force_divisible_by=2 évite les
+       * dimensions impaires incompatibles
+       * avec yuv420p/libx264.
        */
-      "-crf",
-      "21",
+      "-vf",
+      "scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2",
 
       /*
-       * GOP HLS.
+       * CRF légèrement augmenté par rapport
+       * à l'ancienne valeur 21 pour réduire
+       * encore la charge et le débit.
        */
+      "-crf",
+      "23",
+
+      /*
+       * ======================================================
+       * GOP HLS 2 secondes
+       * ======================================================
+       */
+
       "-sc_threshold",
       "0",
 
       "-force_key_frames",
-      "expr:gte(t,n_forced*4)",
+      "expr:gte(t,n_forced*2)",
 
       /*
        * ======================================================
-       * AUDIO APPLE
+       * AUDIO
        * ======================================================
        */
+
       "-c:a",
       "aac",
 
@@ -642,7 +779,7 @@ export async function GET(req: Request) {
       "2",
 
       "-b:a",
-      "160k",
+      "128k",
 
       "-ar",
       "48000",
@@ -661,23 +798,25 @@ export async function GET(req: Request) {
        * HLS
        * ======================================================
        */
+
       "-f",
       "hls",
 
+      /*
+       * Premier segment plus rapide.
+       */
       "-hls_time",
-      "4",
+      "2",
 
       /*
-       * On garde tous les segments.
+       * VOD progressive.
+       *
+       * Safari recharge index.m3u8
+       * pendant l'encodage.
        */
       "-hls_list_size",
       "0",
 
-      /*
-       * Playlist progressive :
-       * Safari la recharge pendant
-       * que FFmpeg continue.
-       */
       "-hls_playlist_type",
       "event",
 
@@ -697,12 +836,16 @@ export async function GET(req: Request) {
       `[VOD HLS START] type=${type} id=${id} ext=${ext} seek=${seek} session=${sessionId}`,
     );
 
+    console.log(
+      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128`,
+    );
+
     /*
-     * Turbopack peut afficher un warning
-     * de tracing ici.
-     *
-     * Ce n'est pas une erreur TypeScript.
+     * ========================================================
+     * Spawn FFmpeg.
+     * ========================================================
      */
+
     const ff =
       spawn(
         /* turbopackIgnore: true */
@@ -722,17 +865,38 @@ export async function GET(req: Request) {
     ff.stderr.on(
       "data",
       (chunk) => {
-        stderr +=
+        const text =
           chunk.toString();
 
+        stderr += text;
+
+        /*
+         * On garde suffisamment de stderr
+         * pour diagnostiquer un échec,
+         * sans remplir la RAM indéfiniment.
+         */
         if (
           stderr.length >
-          12000
+          30000
         ) {
           stderr =
             stderr.slice(
-              -12000,
+              -30000,
             );
+        }
+
+        /*
+         * Affichage immédiat des erreurs
+         * réellement intéressantes.
+         */
+        if (
+          /error|failed|invalid|unsupported|could not|conversion failed|no space|killed/i.test(
+            text,
+          )
+        ) {
+          console.warn(
+            `[VOD HLS FFMPEG] type=${type} id=${id} ${text.trim()}`,
+          );
         }
       },
     );
@@ -769,24 +933,45 @@ export async function GET(req: Request) {
 
     /*
      * ========================================================
-     * On attend seulement que le premier
-     * segment soit disponible.
+     * Premier segment.
      *
-     * FFmpeg continue ensuite.
+     * Différence importante avec l'ancienne
+     * version :
+     *
+     * si FFmpeg ferme avant le premier segment,
+     * on le sait immédiatement.
      * ========================================================
      */
 
     try {
-      await waitForPlaylist(
+      await waitForHlsStartup(
         playlist,
-        30_000,
+        ff,
+        () => stderr,
+        START_TIMEOUT,
       );
     } catch (error) {
-      try {
-        ff.kill(
-          "SIGKILL",
+      /*
+       * Si FFmpeg tourne encore après timeout,
+       * on l'arrête.
+       *
+       * Le SIGKILL qui apparaîtra alors dans
+       * les logs vient explicitement de nous.
+       */
+      if (
+        ff.exitCode === null &&
+        ff.signalCode === null
+      ) {
+        console.error(
+          `[VOD HLS STARTUP TIMEOUT] type=${type} id=${id} session=${sessionId}`,
         );
-      } catch {}
+
+        try {
+          ff.kill(
+            "SIGKILL",
+          );
+        } catch {}
+      }
 
       await rm(
         dir,
@@ -803,18 +988,7 @@ export async function GET(req: Request) {
 
     /*
      * ========================================================
-     * IMPORTANT
-     *
-     * On ne renvoie PLUS directement
-     * une copie du manifest.
-     *
-     * On redirige Safari vers :
-     *
-     * /api/vod-hls?s=SESSION
-     *
-     * Safari pourra donc recharger
-     * exactement cette URL et récupérer
-     * les nouveaux segments.
+     * HLS prêt.
      * ========================================================
      */
 
@@ -832,21 +1006,20 @@ export async function GET(req: Request) {
     );
 
     /*
-     * ========================================================
-     * Nettoyage de sécurité.
+     * Nettoyage sécurité.
      *
-     * Ne surtout pas supprimer lorsque
-     * FFmpeg termine :
-     * Safari peut encore avoir besoin
-     * des anciens segments pour seek.
-     * ========================================================
+     * On conserve les fichiers après la fin
+     * de FFmpeg pour que Safari puisse encore
+     * demander les segments déjà créés.
      */
-
     const cleanup =
       setTimeout(
         async () => {
           try {
-            if (!ff.killed) {
+            if (
+              ff.exitCode === null &&
+              ff.signalCode === null
+            ) {
               ff.kill(
                 "SIGKILL",
               );
@@ -884,8 +1057,7 @@ export async function GET(req: Request) {
     );
 
     /*
-     * 302 vers le manifest permanent
-     * de cette session.
+     * Safari garde cette URL de session.
      */
     return NextResponse.redirect(
       sessionPlaylistUrl,
