@@ -912,7 +912,7 @@ export async function GET(
       "event",
 
       "-hls_flags",
-      "independent_segments",
+      "independent_segments+temp_file",
 
       "-start_number",
       "0",
