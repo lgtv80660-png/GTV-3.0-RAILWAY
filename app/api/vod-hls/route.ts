@@ -1224,20 +1224,6 @@ export async function GET(
         `[VOD HLS PLAYLIST] session=${sessionId}`
       );
 
-      /*
-       * TEMPORAIRE :
-       * garde ce log pendant notre diagnostic iPhone.
-       */
-      console.log(
-        `[VOD HLS MANIFEST CONTENT] session=${sessionId}\n${manifest}`
-      );
-
-      return manifestResponse(
-        manifest,
-        sessionId
-      );
-    }
-
     /* =====================================================
        MODE 2
        DEMANDE DE VOD
