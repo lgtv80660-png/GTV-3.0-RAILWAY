@@ -7,174 +7,232 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+
 import { requireSession } from "@/lib/session";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const UA = "VLC/3.0.20 LibVLC/3.0.20";
+const UA =
+  "VLC/3.0.20 LibVLC/3.0.20";
+
 const FFMPEG =
-  process.env.FFMPEG_PATH || "ffmpeg";
+  process.env.FFMPEG_PATH ||
+  "ffmpeg";
 
 const RAILWAY_URL = (
-  process.env.RAILWAY_PUBLIC_URL || ""
+  process.env.RAILWAY_PUBLIC_URL ||
+  ""
 ).replace(/\/+$/, "");
 
-const ROOT = "/tmp/gtv-vod-hls";
+const ROOT =
+  "/tmp/gtv-vod-hls";
 
-/*
- * Premier segment attendu rapidement.
- *
- * 45 secondes donnent suffisamment de marge
- * pour les hosts Xtream plus lents sans
- * laisser une requête bloquée indéfiniment.
- */
-const START_TIMEOUT = 45_000;
+const START_TIMEOUT =
+  45_000;
 
 const HEADERS = {
   "Cache-Control":
     "no-store, no-cache, must-revalidate",
   Pragma: "no-cache",
   Expires: "0",
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin":
+    "*",
 };
 
-function cleanHost(value: string) {
-  return String(value || "").replace(/\/+$/, "");
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function cleanHost(
+  value: string
+) {
+  return String(
+    value || ""
+  ).replace(/\/+$/, "");
 }
 
-function safe(value: string) {
+function safe(
+  value: string
+) {
   return value.replace(
     /[^a-zA-Z0-9_-]/g,
-    "",
+    ""
   );
 }
 
-function validSessionId(value: string) {
+function validSessionId(
+  value: string
+) {
   return /^[a-zA-Z0-9_-]{20,80}$/.test(
-    value,
+    value
   );
 }
 
-async function exists(file: string) {
+async function exists(
+  file: string
+) {
   try {
     await stat(file);
+
     return true;
   } catch {
     return false;
   }
 }
 
+/* =========================================================
+   WAIT PLAYLIST
+========================================================= */
+
 async function waitForPlaylist(
   playlist: string,
-  timeout = START_TIMEOUT,
+  timeout = START_TIMEOUT
 ) {
-  const started = Date.now();
+  const started =
+    Date.now();
 
   while (
-    Date.now() - started < timeout
+    Date.now() - started <
+    timeout
   ) {
-    if (await exists(playlist)) {
+    if (
+      await exists(
+        playlist
+      )
+    ) {
       try {
         const content =
           await readFile(
             playlist,
-            "utf8",
+            "utf8"
           );
 
         if (
-          content.includes("#EXTM3U") &&
-          content.includes("#EXTINF")
+          content.includes(
+            "#EXTM3U"
+          ) &&
+          content.includes(
+            "#EXTINF"
+          )
         ) {
           return content;
         }
       } catch {}
     }
 
-    await new Promise((resolve) =>
-      setTimeout(resolve, 100),
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          100
+        )
     );
   }
 
   throw new Error(
-    "Timeout génération playlist HLS",
+    "Timeout génération playlist HLS"
   );
 }
 
-/*
- * Attend soit :
- *
- * - le premier segment HLS
- * - la fermeture prématurée de FFmpeg
- * - le timeout
- *
- * Cela évite d'attendre 45 secondes lorsqu'un
- * FFmpeg a déjà échoué.
- */
+/* =========================================================
+   WAIT FFMPEG STARTUP
+========================================================= */
+
 async function waitForHlsStartup(
   playlist: string,
-  ff: ReturnType<typeof spawn>,
+  ff: ReturnType<
+    typeof spawn
+  >,
   getStderr: () => string,
-  timeout = START_TIMEOUT,
+  timeout = START_TIMEOUT
 ) {
   return new Promise<string>(
-    (resolve, reject) => {
-      let finished = false;
+    (
+      resolve,
+      reject
+    ) => {
+      let finished =
+        false;
 
-      const started = Date.now();
+      const started =
+        Date.now();
 
       const finish = (
-        callback: () => void,
+        callback: () => void
       ) => {
-        if (finished) return;
+        if (finished) {
+          return;
+        }
 
         finished = true;
-        clearInterval(timer);
+
+        clearInterval(
+          timer
+        );
+
         callback();
       };
 
-      const timer = setInterval(
-        async () => {
-          if (finished) return;
-
-          if (
-            Date.now() - started >= timeout
-          ) {
-            finish(() =>
-              reject(
-                new Error(
-                  "Timeout génération playlist HLS",
-                ),
-              ),
-            );
-
-            return;
-          }
-
-          if (!(await exists(playlist))) {
-            return;
-          }
-
-          try {
-            const content =
-              await readFile(
-                playlist,
-                "utf8",
-              );
+      const timer =
+        setInterval(
+          async () => {
+            if (finished) {
+              return;
+            }
 
             if (
-              content.includes("#EXTM3U") &&
-              content.includes("#EXTINF")
+              Date.now() -
+                started >=
+              timeout
             ) {
               finish(() =>
-                resolve(content),
+                reject(
+                  new Error(
+                    "Timeout génération playlist HLS"
+                  )
+                )
               );
+
+              return;
             }
-          } catch {}
-        },
-        100,
-      );
+
+            if (
+              !(
+                await exists(
+                  playlist
+                )
+              )
+            ) {
+              return;
+            }
+
+            try {
+              const content =
+                await readFile(
+                  playlist,
+                  "utf8"
+                );
+
+              if (
+                content.includes(
+                  "#EXTM3U"
+                ) &&
+                content.includes(
+                  "#EXTINF"
+                )
+              ) {
+                finish(() =>
+                  resolve(
+                    content
+                  )
+                );
+              }
+            } catch {}
+          },
+          100
+        );
 
       timer.unref?.();
 
@@ -184,150 +242,193 @@ async function waitForHlsStartup(
           finish(() =>
             reject(
               new Error(
-                `FFmpeg impossible à démarrer: ${error.message}`,
-              ),
-            ),
+                `FFmpeg impossible à démarrer: ${error.message}`
+              )
+            )
           );
-        },
+        }
       );
 
       ff.once(
         "close",
-        (code, signal) => {
-          if (finished) return;
+        (
+          code,
+          signal
+        ) => {
+          if (finished) {
+            return;
+          }
 
           const details =
             getStderr()
               .trim()
-              .slice(-5000);
+              .slice(
+                -5000
+              );
 
           finish(() =>
             reject(
               new Error(
                 [
                   "FFmpeg fermé avant création HLS.",
-                  `code=${code ?? "null"}`,
-                  `signal=${signal ?? "null"}`,
+                  `code=${
+                    code ??
+                    "null"
+                  }`,
+                  `signal=${
+                    signal ??
+                    "null"
+                  }`,
                   details
                     ? `stderr=${details}`
                     : "",
                 ]
-                  .filter(Boolean)
-                  .join(" "),
-              ),
-            ),
+                  .filter(
+                    Boolean
+                  )
+                  .join(" ")
+              )
+            )
           );
-        },
+        }
       );
-    },
+    }
   );
 }
 
-/*
- * seg-000001.ts
- *
- * devient :
- *
- * /api/vod-hls-seg?s=SESSION&f=seg-000001.ts
- */
+/* =========================================================
+   MANIFEST REWRITE
+========================================================= */
+
 function rewriteManifest(
   manifest: string,
-  sessionId: string,
+  sessionId: string
 ) {
   return manifest.replace(
     /^(?!#)(.+\.ts)(?:\?.*)?$/gm,
     (line) => {
       const cleanLine =
-        line.trim().split("?")[0];
+        line
+          .trim()
+          .split("?")[0];
 
       const file =
-        path.basename(cleanLine);
+        path.basename(
+          cleanLine
+        );
 
       return (
         `/api/vod-hls-seg` +
         `?s=${encodeURIComponent(
-          sessionId,
+          sessionId
         )}` +
         `&f=${encodeURIComponent(
-          file,
+          file
         )}`
       );
-    },
+    }
   );
 }
 
-export async function GET(req: Request) {
-  try {
-    const url = new URL(req.url);
-    const { searchParams } = url;
+/* =========================================================
+   GET
+========================================================= */
 
-    /*
-     * ========================================================
-     * MODE 1
-     *
-     * Safari recharge une session HLS existante.
-     *
-     * /api/vod-hls?s=SESSION
-     * ========================================================
-     */
+export async function GET(
+  req: Request
+) {
+  try {
+    const url =
+      new URL(
+        req.url
+      );
+
+    const {
+      searchParams,
+    } = url;
+
+    /* =====================================================
+       MODE 1
+       PLAYLIST D'UNE SESSION EXISTANTE
+
+       /api/vod-hls?s=SESSION
+    ===================================================== */
 
     const requestedSession =
-      searchParams.get("s");
+      searchParams.get(
+        "s"
+      );
 
-    if (requestedSession) {
+    if (
+      requestedSession
+    ) {
       const sessionId =
-        safe(requestedSession);
+        safe(
+          requestedSession
+        );
 
       if (
         !sessionId ||
-        !validSessionId(sessionId) ||
-        sessionId !== requestedSession
+        !validSessionId(
+          sessionId
+        ) ||
+        sessionId !==
+          requestedSession
       ) {
         return new Response(
           "Session HLS invalide",
           {
             status: 400,
-            headers: HEADERS,
-          },
+            headers:
+              HEADERS,
+          }
         );
       }
 
-      const dir = path.join(
-        ROOT,
-        sessionId,
-      );
+      const dir =
+        path.join(
+          ROOT,
+          sessionId
+        );
 
-      const playlist = path.join(
-        dir,
-        "index.m3u8",
-      );
+      const playlist =
+        path.join(
+          dir,
+          "index.m3u8"
+        );
 
-      let manifest: string;
+      let manifest:
+        string;
 
       try {
         manifest =
           await waitForPlaylist(
             playlist,
-            10_000,
+            10_000
           );
       } catch {
+        console.warn(
+          `[VOD HLS PLAYLIST NOT FOUND] session=${sessionId}`
+        );
+
         return new Response(
           "Session HLS introuvable ou expirée",
           {
             status: 404,
-            headers: HEADERS,
-          },
+            headers:
+              HEADERS,
+          }
         );
       }
 
       manifest =
         rewriteManifest(
           manifest,
-          sessionId,
+          sessionId
         );
 
       console.log(
-        `[VOD HLS PLAYLIST] session=${sessionId}`,
+        `[VOD HLS PLAYLIST] session=${sessionId}`
       );
 
       return new Response(
@@ -347,45 +448,57 @@ export async function GET(req: Request) {
             "X-GTV-Session":
               sessionId,
           },
-        },
+        }
       );
     }
 
-    /*
-     * ========================================================
-     * MODE 2
-     *
-     * Nouvelle session.
-     * ========================================================
-     */
+    /* =====================================================
+       MODE 2
+       NOUVELLE SESSION
+    ===================================================== */
 
     const type =
-      searchParams.get("type") ===
-      "series"
+      searchParams.get(
+        "type"
+      ) === "series"
         ? "series"
         : "movie";
 
     const id =
-      searchParams.get("id");
+      searchParams.get(
+        "id"
+      );
 
     const ext =
       (
-        searchParams.get("ext") ||
+        searchParams.get(
+          "ext"
+        ) ||
         "mkv"
       )
         .toLowerCase()
-        .replace(/[^a-z0-9]/g, "") ||
+        .replace(
+          /[^a-z0-9]/g,
+          ""
+        ) ||
       "mkv";
 
-    const rawSeek = Number(
-      searchParams.get("t") || 0,
-    );
+    const rawSeek =
+      Number(
+        searchParams.get(
+          "t"
+        ) || 0
+      );
 
     const seek =
-      Number.isFinite(rawSeek)
+      Number.isFinite(
+        rawSeek
+      )
         ? Math.max(
             0,
-            Math.floor(rawSeek),
+            Math.floor(
+              rawSeek
+            )
           )
         : 0;
 
@@ -394,26 +507,31 @@ export async function GET(req: Request) {
         "ID manquant",
         {
           status: 400,
-          headers: HEADERS,
-        },
+          headers:
+            HEADERS,
+        }
       );
     }
 
-    /*
-     * ========================================================
-     * Premier appel :
-     * application / Cloudflare
-     * ========================================================
-     */
+    /* =====================================================
+       PREMIER APPEL
+       APP / CLOUDFLARE
+    ===================================================== */
 
     const directHost =
-      searchParams.get("_h");
+      searchParams.get(
+        "_h"
+      );
 
     const directUser =
-      searchParams.get("_u");
+      searchParams.get(
+        "_u"
+      );
 
     const directPass =
-      searchParams.get("_p");
+      searchParams.get(
+        "_p"
+      );
 
     if (
       !directHost ||
@@ -430,8 +548,9 @@ export async function GET(req: Request) {
           "Non autorisé",
           {
             status: 401,
-            headers: HEADERS,
-          },
+            headers:
+              HEADERS,
+          }
         );
       }
 
@@ -441,7 +560,7 @@ export async function GET(req: Request) {
             session?.url ||
             session?.serverUrl ||
             session?.host ||
-            "",
+            ""
         );
 
       const username =
@@ -463,82 +582,90 @@ export async function GET(req: Request) {
           "Identifiants Xtream incomplets",
           {
             status: 400,
-            headers: HEADERS,
-          },
+            headers:
+              HEADERS,
+          }
         );
       }
 
-      if (!RAILWAY_URL) {
+      if (
+        !RAILWAY_URL
+      ) {
         return new Response(
           "RAILWAY_PUBLIC_URL manquante",
           {
             status: 500,
-            headers: HEADERS,
-          },
+            headers:
+              HEADERS,
+          }
         );
       }
 
       const target =
         new URL(
           "/api/vod-hls",
-          RAILWAY_URL,
+          RAILWAY_URL
         );
 
       target.searchParams.set(
         "type",
-        type,
+        type
       );
 
       target.searchParams.set(
         "id",
-        id,
+        id
       );
 
       target.searchParams.set(
         "ext",
-        ext,
+        ext
       );
 
-      if (seek > 0) {
+      if (
+        seek > 0
+      ) {
         target.searchParams.set(
           "t",
-          String(seek),
+          String(
+            seek
+          )
         );
       }
 
       target.searchParams.set(
         "_h",
-        host,
+        host
       );
 
       target.searchParams.set(
         "_u",
-        username,
+        username
       );
 
       target.searchParams.set(
         "_p",
-        password,
+        password
       );
 
       console.log(
-        `[VOD HLS REDIRECT] ${type} id=${id} seek=${seek}`,
+        `[VOD HLS REDIRECT] ${type} id=${id} seek=${seek} -> ${target.origin}`
       );
 
       return NextResponse.redirect(
         target,
-        302,
+        302
       );
     }
 
-    /*
-     * ========================================================
-     * Railway direct.
-     * ========================================================
-     */
+    /* =====================================================
+       RAILWAY DIRECT
+    ===================================================== */
 
     const host =
-      cleanHost(directHost);
+      cleanHost(
+        directHost
+      );
 
     const username =
       directUser;
@@ -555,89 +682,88 @@ export async function GET(req: Request) {
         "Paramètres Railway incomplets",
         {
           status: 400,
-          headers: HEADERS,
-        },
+          headers:
+            HEADERS,
+        }
+      );
+    }
+
+    if (
+      !RAILWAY_URL
+    ) {
+      return new Response(
+        "RAILWAY_PUBLIC_URL manquante",
+        {
+          status: 500,
+          headers:
+            HEADERS,
+        }
       );
     }
 
     const folder =
-      type === "series"
+      type ===
+      "series"
         ? "series"
         : "movie";
 
     const inputUrl =
       `${host}/${folder}/` +
       `${encodeURIComponent(
-        username,
+        username
       )}/` +
       `${encodeURIComponent(
-        password,
+        password
       )}/` +
       `${encodeURIComponent(
-        id,
+        id
       )}.${ext}`;
 
-    /*
-     * ========================================================
-     * Session HLS.
-     * ========================================================
-     */
+    /* =====================================================
+       SESSION HLS
+    ===================================================== */
 
     const sessionId =
       safe(
-        crypto.randomUUID(),
+        crypto.randomUUID()
       );
 
     const dir =
       path.join(
         ROOT,
-        sessionId,
+        sessionId
       );
 
     await mkdir(
       dir,
       {
         recursive: true,
-      },
+      }
     );
 
     const playlist =
       path.join(
         dir,
-        "index.m3u8",
+        "index.m3u8"
       );
 
     const segmentPattern =
       path.join(
         dir,
-        "seg-%06d.ts",
+        "seg-%06d.ts"
       );
 
-    /*
-     * ========================================================
-     * FFmpeg Apple HLS
-     *
-     * IMPORTANT :
-     *
-     * - H264
-     * - AAC
-     * - yuv420p
-     * - maximum 1080p
-     * - aucun upscale
-     * - preset ultrafast
-     * - segments 2 secondes
-     *
-     * Le scale :
-     *
-     * 3840x2160 -> 1920x1080
-     * 2560x1440 -> 1920x1080
-     * 1920x1080 -> 1920x1080
-     * 1280x720  -> 1280x720
-     *
-     * force_original_aspect_ratio=decrease
-     * empêche l'upscale.
-     * ========================================================
-     */
+    /* =====================================================
+       FFMPEG
+       APPLE HLS
+
+       H264
+       AAC
+       YUV420P
+       MAX 1080P
+       ULTRAFAST
+       SEGMENTS 2 SEC
+    ===================================================== */
 
     const args = [
       "-hide_banner",
@@ -647,9 +773,10 @@ export async function GET(req: Request) {
 
       "-nostdin",
 
-      /*
-       * Xtream HTTP
-       */
+      /* -----------------------------
+         XTREAM HTTP
+      ----------------------------- */
+
       "-user_agent",
       UA,
 
@@ -671,60 +798,52 @@ export async function GET(req: Request) {
       "-fflags",
       "+genpts+discardcorrupt",
 
-      /*
-       * Certains MKV demandent davantage
-       * d'analyse avant de trouver correctement
-       * vidéo + audio.
-       */
       "-analyzeduration",
       "10000000",
 
       "-probesize",
       "10000000",
 
-      /*
-       * Resume.
-       */
+      /* -----------------------------
+         SEEK
+      ----------------------------- */
+
       ...(seek > 0
         ? [
             "-ss",
-            String(seek),
+            String(
+              seek
+            ),
           ]
         : []),
+
+      /* -----------------------------
+         INPUT
+      ----------------------------- */
 
       "-i",
       inputUrl,
 
-      /*
-       * Uniquement première vidéo + premier audio.
-       *
-       * Pas de subtitles.
-       * Pas d'attachments MKV.
-       */
+      /* -----------------------------
+         MAP
+      ----------------------------- */
+
       "-map",
       "0:v:0?",
 
       "-map",
       "0:a:0?",
 
-      /*
-       * ======================================================
-       * VIDEO
-       * ======================================================
-       */
+      /* -----------------------------
+         VIDEO
+      ----------------------------- */
 
       "-c:v",
       "libx264",
 
-      /*
-       * Priorité à la vitesse CPU Railway.
-       */
       "-preset",
       "ultrafast",
 
-      /*
-       * H264 très compatible Apple.
-       */
       "-profile:v",
       "main",
 
@@ -734,31 +853,15 @@ export async function GET(req: Request) {
       "-pix_fmt",
       "yuv420p",
 
-      /*
-       * Maximum 1920x1080.
-       *
-       * Pas d'upscale.
-       *
-       * force_divisible_by=2 évite les
-       * dimensions impaires incompatibles
-       * avec yuv420p/libx264.
-       */
       "-vf",
       "scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2",
 
-      /*
-       * CRF légèrement augmenté par rapport
-       * à l'ancienne valeur 21 pour réduire
-       * encore la charge et le débit.
-       */
       "-crf",
       "23",
 
-      /*
-       * ======================================================
-       * GOP HLS 2 secondes
-       * ======================================================
-       */
+      /* -----------------------------
+         GOP
+      ----------------------------- */
 
       "-sc_threshold",
       "0",
@@ -766,11 +869,9 @@ export async function GET(req: Request) {
       "-force_key_frames",
       "expr:gte(t,n_forced*2)",
 
-      /*
-       * ======================================================
-       * AUDIO
-       * ======================================================
-       */
+      /* -----------------------------
+         AUDIO
+      ----------------------------- */
 
       "-c:a",
       "aac",
@@ -787,33 +888,23 @@ export async function GET(req: Request) {
       "-af",
       "aresample=async=1:first_pts=0",
 
-      /*
-       * Timestamps.
-       */
+      /* -----------------------------
+         TIMESTAMPS
+      ----------------------------- */
+
       "-avoid_negative_ts",
       "make_zero",
 
-      /*
-       * ======================================================
-       * HLS
-       * ======================================================
-       */
+      /* -----------------------------
+         HLS
+      ----------------------------- */
 
       "-f",
       "hls",
 
-      /*
-       * Premier segment plus rapide.
-       */
       "-hls_time",
       "2",
 
-      /*
-       * VOD progressive.
-       *
-       * Safari recharge index.m3u8
-       * pendant l'encodage.
-       */
       "-hls_list_size",
       "0",
 
@@ -833,18 +924,16 @@ export async function GET(req: Request) {
     ];
 
     console.log(
-      `[VOD HLS START] type=${type} id=${id} ext=${ext} seek=${seek} session=${sessionId}`,
+      `[VOD HLS START] type=${type} id=${id} ext=${ext} seek=${seek} session=${sessionId}`
     );
 
     console.log(
-      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128`,
+      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128`
     );
 
-    /*
-     * ========================================================
-     * Spawn FFmpeg.
-     * ========================================================
-     */
+    /* =====================================================
+       SPAWN FFMPEG
+    ===================================================== */
 
     const ff =
       spawn(
@@ -857,7 +946,7 @@ export async function GET(req: Request) {
             "ignore",
             "pipe",
           ],
-        },
+        }
       );
 
     let stderr = "";
@@ -868,37 +957,29 @@ export async function GET(req: Request) {
         const text =
           chunk.toString();
 
-        stderr += text;
+        stderr +=
+          text;
 
-        /*
-         * On garde suffisamment de stderr
-         * pour diagnostiquer un échec,
-         * sans remplir la RAM indéfiniment.
-         */
         if (
           stderr.length >
           30000
         ) {
           stderr =
             stderr.slice(
-              -30000,
+              -30000
             );
         }
 
-        /*
-         * Affichage immédiat des erreurs
-         * réellement intéressantes.
-         */
         if (
           /error|failed|invalid|unsupported|could not|conversion failed|no space|killed/i.test(
-            text,
+            text
           )
         ) {
           console.warn(
-            `[VOD HLS FFMPEG] type=${type} id=${id} ${text.trim()}`,
+            `[VOD HLS FFMPEG] type=${type} id=${id} ${text.trim()}`
           );
         }
-      },
+      }
     );
 
     ff.on(
@@ -906,69 +987,58 @@ export async function GET(req: Request) {
       (error) => {
         console.error(
           `[VOD HLS FFMPEG ERROR] type=${type} id=${id} session=${sessionId}`,
-          error,
+          error
         );
-      },
+      }
     );
 
     ff.on(
       "close",
       (
         code,
-        signal,
+        signal
       ) => {
         console.log(
-          `[VOD HLS CLOSED] type=${type} id=${id} session=${sessionId} code=${code} signal=${signal}`,
+          `[VOD HLS CLOSED] type=${type} id=${id} session=${sessionId} code=${code} signal=${signal}`
         );
 
         if (
           stderr.trim()
         ) {
           console.log(
-            `[VOD HLS STDERR] type=${type} id=${id}\n${stderr}`,
+            `[VOD HLS STDERR] type=${type} id=${id}\n${stderr}`
           );
         }
-      },
+      }
     );
 
-    /*
-     * ========================================================
-     * Premier segment.
-     *
-     * Différence importante avec l'ancienne
-     * version :
-     *
-     * si FFmpeg ferme avant le premier segment,
-     * on le sait immédiatement.
-     * ========================================================
-     */
+    /* =====================================================
+       ATTENTE PREMIER SEGMENT
+    ===================================================== */
 
     try {
       await waitForHlsStartup(
         playlist,
         ff,
         () => stderr,
-        START_TIMEOUT,
+        START_TIMEOUT
       );
-    } catch (error) {
-      /*
-       * Si FFmpeg tourne encore après timeout,
-       * on l'arrête.
-       *
-       * Le SIGKILL qui apparaîtra alors dans
-       * les logs vient explicitement de nous.
-       */
+    } catch (
+      error
+    ) {
       if (
-        ff.exitCode === null &&
-        ff.signalCode === null
+        ff.exitCode ===
+          null &&
+        ff.signalCode ===
+          null
       ) {
         console.error(
-          `[VOD HLS STARTUP TIMEOUT] type=${type} id=${id} session=${sessionId}`,
+          `[VOD HLS STARTUP TIMEOUT] type=${type} id=${id} session=${sessionId}`
         );
 
         try {
           ff.kill(
-            "SIGKILL",
+            "SIGKILL"
           );
         } catch {}
       }
@@ -978,50 +1048,56 @@ export async function GET(req: Request) {
         {
           recursive: true,
           force: true,
-        },
+        }
       ).catch(
-        () => {},
+        () => {}
       );
 
       throw error;
     }
 
-    /*
-     * ========================================================
-     * HLS prêt.
-     * ========================================================
-     */
+    /* =====================================================
+       HLS READY
+
+       IMPORTANT :
+       NE JAMAIS UTILISER req.url ICI.
+
+       Railway peut exposer req.url avec :
+       localhost:8080
+
+       La playlist publique doit TOUJOURS utiliser :
+       RAILWAY_PUBLIC_URL
+    ===================================================== */
 
     const sessionPlaylistUrl =
       new URL(
         "/api/vod-hls",
-        req.url,
+        RAILWAY_URL
       );
 
-    sessionPlaylistUrl.search = "";
+    sessionPlaylistUrl
+      .searchParams
+      .set(
+        "s",
+        sessionId
+      );
 
-    sessionPlaylistUrl.searchParams.set(
-      "s",
-      sessionId,
-    );
+    /* =====================================================
+       CLEANUP
+    ===================================================== */
 
-    /*
-     * Nettoyage sécurité.
-     *
-     * On conserve les fichiers après la fin
-     * de FFmpeg pour que Safari puisse encore
-     * demander les segments déjà créés.
-     */
     const cleanup =
       setTimeout(
         async () => {
           try {
             if (
-              ff.exitCode === null &&
-              ff.signalCode === null
+              ff.exitCode ===
+                null &&
+              ff.signalCode ===
+                null
             ) {
               ff.kill(
-                "SIGKILL",
+                "SIGKILL"
               );
             }
           } catch {}
@@ -1029,44 +1105,58 @@ export async function GET(req: Request) {
           await rm(
             dir,
             {
-              recursive: true,
-              force: true,
-            },
+              recursive:
+                true,
+              force:
+                true,
+            }
           ).catch(
-            () => {},
+            () => {}
           );
 
           console.log(
-            `[VOD HLS CLEANUP] session=${sessionId}`,
+            `[VOD HLS CLEANUP] session=${sessionId}`
           );
         },
+
         4 *
           60 *
           60 *
-          1000,
+          1000
       );
 
     cleanup.unref?.();
 
+    /* =====================================================
+       LOG FINAL
+    ===================================================== */
+
     console.log(
-      `[VOD HLS READY] type=${type} id=${id} session=${sessionId}`,
+      `[VOD HLS READY] type=${type} id=${id} session=${sessionId}`
     );
 
     console.log(
-      `[VOD HLS MANIFEST] session=${sessionId} -> ${sessionPlaylistUrl.pathname}${sessionPlaylistUrl.search}`,
+      `[VOD HLS MANIFEST] session=${sessionId} -> ${sessionPlaylistUrl.toString()}`
     );
 
-    /*
-     * Safari garde cette URL de session.
-     */
+    /* =====================================================
+       REDIRECT PUBLIC RAILWAY
+
+       Exemple attendu :
+
+       https://xxxx.up.railway.app/api/vod-hls?s=...
+    ===================================================== */
+
     return NextResponse.redirect(
       sessionPlaylistUrl,
-      302,
+      302
     );
-  } catch (error: any) {
+  } catch (
+    error: any
+  ) {
     console.error(
       "[VOD-HLS]",
-      error,
+      error
     );
 
     return new Response(
@@ -1076,8 +1166,9 @@ export async function GET(req: Request) {
       }`,
       {
         status: 500,
-        headers: HEADERS,
-      },
+        headers:
+          HEADERS,
+      }
     );
   }
 }
