@@ -30,25 +30,8 @@ const ROOT =
 const START_TIMEOUT =
   45_000;
 
-/*
- * Une session déjà créée pour exactement la même VOD
- * peut être réutilisée.
- *
- * On ne veut surtout pas recréer FFmpeg simplement parce
- * que Safari / VideoPlayer rappelle l'URL initiale.
- */
 const SESSION_REUSE_MAX_AGE =
   4 * 60 * 60 * 1000;
-
-/*
- * Une playlist d'une session active peut ne pas changer
- * pendant quelques secondes si Xtream est en reconnexion.
- *
- * On ne considère donc PAS une session morte uniquement
- * parce que le manifeste n'a pas été modifié récemment.
- */
-const SESSION_START_WAIT =
-  15_000;
 
 /* =========================================================
    HEADERS
@@ -123,17 +106,6 @@ type VodHlsSession = {
 
 /* =========================================================
    GLOBAL SESSION REGISTRY
-
-   IMPORTANT :
-
-   Next.js peut conserver ce module pendant toute la durée
-   du process Node.
-
-   On place donc le registry dans globalThis afin d'éviter
-   de perdre la référence lors d'un rechargement du module.
-
-   Ce registry sert UNIQUEMENT à éviter plusieurs FFmpeg
-   identiques dans le même process Railway.
 ========================================================= */
 
 declare global {
@@ -194,6 +166,14 @@ function validSessionId(
   );
 }
 
+function validSegmentName(
+  value: string
+) {
+  return /^seg-\d+\.ts$/i.test(
+    value
+  );
+}
+
 async function exists(
   file: string
 ) {
@@ -207,18 +187,6 @@ async function exists(
 
 /* =========================================================
    SESSION KEY
-
-   Deux requêtes ne partagent une session QUE si :
-
-   - même serveur Xtream
-   - même utilisateur
-   - même type
-   - même ID
-   - même extension
-   - même seek
-
-   Le mot de passe n'est volontairement pas enregistré
-   dans la clé en clair.
 ========================================================= */
 
 function createSessionKey(
@@ -251,7 +219,7 @@ function createSessionKey(
 }
 
 /* =========================================================
-   SESSION REGISTRY HELPERS
+   SESSION REGISTRY
 ========================================================= */
 
 function registerSession(
@@ -276,10 +244,6 @@ function unregisterSession(
       session.key
     );
 
-  /*
-   * Ne surtout pas supprimer une nouvelle session qui aurait
-   * éventuellement remplacé l'ancienne avec la même clé.
-   */
   if (
     currentByKey?.sessionId ===
     session.sessionId
@@ -311,10 +275,6 @@ function processIsAlive(
     session.ffmpeg;
 
   if (!ff) {
-    /*
-     * Session enregistrée mais FFmpeg pas encore attaché :
-     * cela correspond à la très courte fenêtre de démarrage.
-     */
     return !session.closed;
   }
 
@@ -325,42 +285,8 @@ function processIsAlive(
   );
 }
 
-async function sessionHasPlaylist(
-  session: VodHlsSession
-) {
-  if (
-    !(
-      await exists(
-        session.playlist
-      )
-    )
-  ) {
-    return false;
-  }
-
-  try {
-    const manifest =
-      await readFile(
-        session.playlist,
-        "utf8"
-      );
-
-    return playlistIsReady(
-      manifest
-    );
-  } catch {
-    return false;
-  }
-}
-
 /* =========================================================
    REMOVE SESSION
-
-   killProcess=false :
-   uniquement retirer du registry.
-
-   killProcess=true :
-   destruction explicite de FFmpeg + fichiers.
 ========================================================= */
 
 async function removeSession(
@@ -387,7 +313,9 @@ async function removeSession(
     session
   );
 
-  if (killProcess) {
+  if (
+    killProcess
+  ) {
     const ff =
       session.ffmpeg;
 
@@ -411,7 +339,9 @@ async function removeSession(
   session.closed =
     true;
 
-  if (removeFiles) {
+  if (
+    removeFiles
+  ) {
     await rm(
       session.dir,
       {
@@ -428,17 +358,7 @@ async function removeSession(
 }
 
 /* =========================================================
-   PRUNE REGISTRY
-
-   IMPORTANT :
-
-   On ne tue PAS une session simplement parce qu'une nouvelle
-   requête du même film arrive.
-
-   Une session est retirée ici seulement si :
-
-   - le process est déjà fermé
-   - ou elle dépasse la durée maximale prévue
+   PRUNE
 ========================================================= */
 
 async function pruneSessions() {
@@ -503,7 +423,7 @@ async function pruneSessions() {
 }
 
 /* =========================================================
-   FIND REUSABLE SESSION
+   REUSE
 ========================================================= */
 
 async function findReusableSession(
@@ -846,7 +766,15 @@ async function waitForHlsStartup(
 }
 
 /* =========================================================
-   MANIFEST REWRITE
+   PURE HLS MANIFEST REWRITE
+
+   AVANT :
+   /api/vod-hls-seg?s=SESSION&f=seg-000001.ts
+
+   MAINTENANT :
+   /api/vod-hls?s=SESSION&seg=seg-000001.ts
+
+   Playlist + segments sont servis par UNE SEULE route HLS.
 ========================================================= */
 
 function rewriteManifest(
@@ -897,7 +825,7 @@ function rewriteManifest(
           );
 
         if (
-          !/^seg-\d+\.ts$/i.test(
+          !validSegmentName(
             file
           )
         ) {
@@ -905,11 +833,11 @@ function rewriteManifest(
         }
 
         return (
-          `/api/vod-hls-seg` +
+          `/api/vod-hls` +
           `?s=${encodeURIComponent(
             sessionId
           )}` +
-          `&f=${encodeURIComponent(
+          `&seg=${encodeURIComponent(
             file
           )}`
         );
@@ -940,7 +868,8 @@ function manifestResponse(
   return new Response(
     body,
     {
-      status: 200,
+      status:
+        200,
 
       headers: {
         ...HEADERS,
@@ -952,7 +881,7 @@ function manifestResponse(
           "no-store, no-cache, must-revalidate, max-age=0",
 
         "X-GTV-Mode":
-          "apple-hls-session",
+          "pure-hls",
 
         "X-GTV-Session":
           sessionId,
@@ -967,7 +896,7 @@ function manifestResponse(
 }
 
 /* =========================================================
-   CREATE SESSION PLAYLIST URL
+   SESSION PLAYLIST URL
 ========================================================= */
 
 function createSessionPlaylistUrl(
@@ -988,7 +917,7 @@ function createSessionPlaylistUrl(
 }
 
 /* =========================================================
-   REDIRECT TO EXISTING SESSION
+   REDIRECT SESSION
 ========================================================= */
 
 function redirectToSession(
@@ -1013,7 +942,8 @@ function redirectToSession(
   return NextResponse.redirect(
     target,
     {
-      status: 302,
+      status:
+        302,
 
       headers: {
         "Cache-Control":
@@ -1052,7 +982,7 @@ export async function GET(
 
     /* =====================================================
        MODE 1
-       PLAYLIST D'UNE SESSION EXISTANTE
+       SESSION HLS EXISTANTE
     ===================================================== */
 
     const requestedSession =
@@ -1094,12 +1024,6 @@ export async function GET(
           sessionId
         );
 
-      const playlist =
-        path.join(
-          dir,
-          "index.m3u8"
-        );
-
       const registeredSession =
         sessionsById.get(
           sessionId
@@ -1111,6 +1035,118 @@ export async function GET(
         registeredSession.lastAccessAt =
           Date.now();
       }
+
+      /* =====================================================
+         MODE 1A
+         SEGMENT HLS DIRECT
+
+         Plus aucun /api/vod-hls-seg.
+      ===================================================== */
+
+      const requestedSegment =
+        searchParams.get(
+          "seg"
+        );
+
+      if (
+        requestedSegment
+      ) {
+        const file =
+          path.basename(
+            requestedSegment
+          );
+
+        if (
+          !validSegmentName(
+            file
+          ) ||
+          file !==
+            requestedSegment
+        ) {
+          return new Response(
+            "Segment HLS invalide",
+            {
+              status:
+                400,
+
+              headers:
+                HEADERS,
+            }
+          );
+        }
+
+        const segmentPath =
+          path.join(
+            dir,
+            file
+          );
+
+        try {
+          const segment =
+            await readFile(
+              segmentPath
+            );
+
+          /*
+           * IMPORTANT :
+           * aucun log par segment.
+           */
+
+          return new Response(
+            segment,
+            {
+              status:
+                200,
+
+              headers: {
+                ...HEADERS,
+
+                "Content-Type":
+                  "video/mp2t",
+
+                "Content-Length":
+                  String(
+                    segment.length
+                  ),
+
+                "Accept-Ranges":
+                  "bytes",
+
+                "Cache-Control":
+                  "no-store, no-cache, must-revalidate, max-age=0",
+
+                "X-GTV-Mode":
+                  "pure-hls-segment",
+
+                "X-GTV-Session":
+                  sessionId,
+              },
+            }
+          );
+        } catch {
+          return new Response(
+            "Segment HLS introuvable",
+            {
+              status:
+                404,
+
+              headers:
+                HEADERS,
+            }
+          );
+        }
+      }
+
+      /* =====================================================
+         MODE 1B
+         PLAYLIST HLS
+      ===================================================== */
+
+      const playlist =
+        path.join(
+          dir,
+          "index.m3u8"
+        );
 
       let manifest:
         string;
@@ -1147,11 +1183,7 @@ export async function GET(
       }
 
       /*
-       * IMPORTANT :
-       * On ne loggue PLUS le contenu complet du manifeste.
-       *
-       * Avant, chaque refresh Safari imprimait toute la playlist
-       * EVENT et finissait par saturer les logs Railway.
+       * PAS DE DUMP DU MANIFESTE.
        */
 
       return manifestResponse(
@@ -1162,7 +1194,7 @@ export async function GET(
 
     /* =====================================================
        MODE 2
-       DEMANDE DE VOD
+       NOUVELLE DEMANDE VOD
     ===================================================== */
 
     const type:
@@ -1226,7 +1258,7 @@ export async function GET(
         }
       );
     }
-        /* =====================================================
+         /* =====================================================
        PREMIER APPEL
        APP / CLOUDFLARE
     ===================================================== */
@@ -1442,7 +1474,7 @@ export async function GET(
       );
 
     /* =====================================================
-       RÉUTILISATION
+       REUSE
     ===================================================== */
 
     const reusableSession =
@@ -1485,7 +1517,7 @@ export async function GET(
       )}.${ext}`;
 
     /* =====================================================
-       NOUVELLE SESSION HLS
+       NOUVELLE SESSION
     ===================================================== */
 
     const sessionId =
@@ -1519,10 +1551,6 @@ export async function GET(
         "seg-%06d.ts"
       );
 
-    /*
-     * IMPORTANT :
-     * On enregistre la session AVANT spawn().
-     */
     const vodSession:
       VodHlsSession = {
         key:
@@ -1573,12 +1601,9 @@ export async function GET(
     );
 
     /* =====================================================
-       FFMPEG
-       APPLE HLS
+       FFMPEG — PURE HLS
 
-       IMPORTANT :
-       Cette configuration reste volontairement celle du
-       HLS qui a fonctionné avec 841199.
+       On conserve volontairement le profil du cas 841199.
     ===================================================== */
 
     const args = [
@@ -1589,7 +1614,7 @@ export async function GET(
 
       "-nostdin",
 
-      /* XTREAM HTTP */
+      /* XTREAM */
 
       "-user_agent",
       UA,
@@ -1621,7 +1646,7 @@ export async function GET(
       "-reconnect_delay_total_max",
       "300",
 
-      /* ANALYSE INPUT */
+      /* INPUT ANALYSIS */
 
       "-fflags",
       "+discardcorrupt",
@@ -1746,11 +1771,11 @@ export async function GET(
     );
 
     console.log(
-      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128 safari=1 timeline=stable-v3 reuse=1`
+      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128 safari=1 mode=pure-hls reuse=1`
     );
 
     /* =====================================================
-       SPAWN FFMPEG
+       SPAWN
     ===================================================== */
 
     const ff =
@@ -1770,13 +1795,12 @@ export async function GET(
     vodSession.ffmpeg =
       ff;
 
+    console.log(
+      `[VOD HLS SPAWN] type=${type} id=${id} session=${sessionId} pid=${ff.pid ?? "unknown"} active=${sessionsById.size}`
+    );
+
     let stderr =
       "";
-
-    /*
-     * FFmpeg continue après la fin de la requête HTTP.
-     * Il n'est PAS lié au AbortSignal de req.
-     */
 
     ff.stderr.on(
       "data",
@@ -1800,8 +1824,7 @@ export async function GET(
         }
 
         /*
-         * On conserve uniquement les messages FFmpeg utiles
-         * au diagnostic des coupures/reconnexions.
+         * Seulement les événements FFmpeg utiles.
          */
         if (
           /error|failed|invalid|unsupported|could not|conversion failed|no space|killed|prematurely|reconnect|timestamp|non-monotonous|discontinuity/i.test(
@@ -1844,28 +1867,18 @@ export async function GET(
         );
 
         console.log(
-          `[VOD HLS CLOSED] type=${type} id=${id} session=${sessionId} code=${code} signal=${signal}`
+          `[VOD HLS CLOSED] type=${type} id=${id} session=${sessionId} pid=${ff.pid ?? "unknown"} code=${code} signal=${signal} active=${sessionsById.size}`
         );
 
         /*
-         * IMPORTANT :
-         * On ne redumpe plus ici les 30 KB de stderr.
-         *
-         * Les erreurs importantes sont déjà remontées
-         * par VOD HLS FFMPEG au moment où elles arrivent.
-         *
-         * Cela réduit fortement le bruit Railway.
-         */
-
-        /*
-         * On ne supprime PAS immédiatement les fichiers.
-         * Safari peut encore demander un segment déjà généré.
+         * PAS de dump complet stderr ici.
+         * Les erreurs importantes sont déjà logguées plus haut.
          */
       }
     );
 
     /* =====================================================
-       ATTENTE DÉMARRAGE HLS
+       STARTUP
     ===================================================== */
 
     try {
@@ -1927,7 +1940,7 @@ export async function GET(
     }
 
     /* =====================================================
-       VALIDATION DU PREMIER MANIFESTE
+       INITIAL MANIFEST
     ===================================================== */
 
     let initialManifest =
@@ -2024,7 +2037,7 @@ export async function GET(
     );
 
     /* =====================================================
-       CLEANUP
+       CLEANUP 4H
     ===================================================== */
 
     const cleanup =
@@ -2119,19 +2132,11 @@ export async function GET(
 /* =========================================================
    HEAD
 
-   Safari / iOS peut effectuer une requête HEAD
-   avant ou pendant la lecture du manifeste.
+   HLS direct :
+   - playlist : ?s=SESSION
+   - segment  : ?s=SESSION&seg=seg-XXXXXX.ts
 
-   IMPORTANT :
-
-   - HEAD avec ?s=SESSION :
-     vérifie la session existante.
-
-   - HEAD sans ?s= :
-     confirme seulement que la route existe.
-
-   - HEAD ne crée JAMAIS de session.
-   - HEAD ne démarre JAMAIS FFmpeg.
+   HEAD ne démarre jamais FFmpeg.
 ========================================================= */
 
 export async function HEAD(
@@ -2149,7 +2154,7 @@ export async function HEAD(
       );
 
     /* =====================================================
-       HEAD D'UNE SESSION EXISTANTE
+       HEAD SESSION
     ===================================================== */
 
     if (
@@ -2180,13 +2185,6 @@ export async function HEAD(
         );
       }
 
-      /*
-       * Le registry n'est pas obligatoire ici.
-       *
-       * Même si le process Next a perdu son registry,
-       * les fichiers HLS présents dans /tmp peuvent encore
-       * être servis.
-       */
       const registeredSession =
         sessionsById.get(
           sessionId
@@ -2205,6 +2203,103 @@ export async function HEAD(
           sessionId
         );
 
+      /* =====================================================
+         HEAD SEGMENT
+      ===================================================== */
+
+      const requestedSegment =
+        url.searchParams.get(
+          "seg"
+        );
+
+      if (
+        requestedSegment
+      ) {
+        const file =
+          path.basename(
+            requestedSegment
+          );
+
+        if (
+          !validSegmentName(
+            file
+          ) ||
+          file !==
+            requestedSegment
+        ) {
+          return new Response(
+            null,
+            {
+              status:
+                400,
+
+              headers:
+                HEADERS,
+            }
+          );
+        }
+
+        const segmentPath =
+          path.join(
+            dir,
+            file
+          );
+
+        try {
+          const info =
+            await stat(
+              segmentPath
+            );
+
+          return new Response(
+            null,
+            {
+              status:
+                200,
+
+              headers: {
+                ...HEADERS,
+
+                "Content-Type":
+                  "video/mp2t",
+
+                "Content-Length":
+                  String(
+                    info.size
+                  ),
+
+                "Accept-Ranges":
+                  "bytes",
+
+                "Cache-Control":
+                  "no-store, no-cache, must-revalidate, max-age=0",
+
+                "X-GTV-Mode":
+                  "pure-hls-segment",
+
+                "X-GTV-Session":
+                  sessionId,
+              },
+            }
+          );
+        } catch {
+          return new Response(
+            null,
+            {
+              status:
+                404,
+
+              headers:
+                HEADERS,
+            }
+          );
+        }
+      }
+
+      /* =====================================================
+         HEAD PLAYLIST
+      ===================================================== */
+
       const playlist =
         path.join(
           dir,
@@ -2215,12 +2310,6 @@ export async function HEAD(
         string;
 
       try {
-        /*
-         * FFmpeg écrit le manifeste avec temp_file.
-         *
-         * Il peut donc se trouver brièvement entre
-         * l'écriture du fichier temporaire et son rename.
-         */
         manifest =
           await waitForPlaylist(
             playlist,
@@ -2257,14 +2346,6 @@ export async function HEAD(
           sessionId
         );
 
-      /*
-       * HEAD reste un log léger :
-       * aucun contenu de manifeste n'est imprimé.
-       */
-      console.log(
-        `[VOD HLS HEAD] session=${sessionId} registered=${registeredSession ? 1 : 0}`
-      );
-
       return new Response(
         null,
         {
@@ -2289,7 +2370,7 @@ export async function HEAD(
               "no-store, no-cache, must-revalidate, max-age=0",
 
             "X-GTV-Mode":
-              "apple-hls-session",
+              "pure-hls",
 
             "X-GTV-Session":
               sessionId,
@@ -2311,14 +2392,8 @@ export async function HEAD(
     /* =====================================================
        HEAD SANS SESSION
 
-       IMPORTANT :
-
-       Ne jamais :
-       - appeler requireSession()
-       - rediriger vers Railway
-       - créer randomUUID()
-       - créer un dossier
-       - lancer FFmpeg
+       Ne crée aucune session.
+       Ne lance jamais FFmpeg.
     ===================================================== */
 
     return new Response(
@@ -2337,7 +2412,7 @@ export async function HEAD(
             "no-store, no-cache, must-revalidate, max-age=0",
 
           "X-GTV-Mode":
-            "apple-hls",
+            "pure-hls",
         },
       }
     );
@@ -2365,8 +2440,6 @@ export async function HEAD(
 
 /* =========================================================
    OPTIONS
-
-   CORS / Safari
 ========================================================= */
 
 export async function OPTIONS() {
