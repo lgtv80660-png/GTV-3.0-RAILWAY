@@ -1,5 +1,6 @@
 import {
   spawn,
+  type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 
 import {
@@ -20,11 +21,8 @@ import {
   NextResponse,
 } from "next/server";
 
-export const runtime =
-  "nodejs";
-
-export const dynamic =
-  "force-dynamic";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 /* =========================================================
    CONFIG
@@ -34,13 +32,11 @@ const UA =
   "VLC/3.0.20 LibVLC/3.0.20";
 
 const FFMPEG =
-  process.env
-    .FFMPEG_PATH ||
+  process.env.FFMPEG_PATH ||
   "ffmpeg";
 
 const RAILWAY_URL = (
-  process.env
-    .RAILWAY_PUBLIC_URL ||
+  process.env.RAILWAY_PUBLIC_URL ||
   ""
 ).replace(
   /\/+$/,
@@ -54,14 +50,29 @@ const START_TIMEOUT =
   45_000;
 
 /*
- * SAFARI / HLS
+ * Une session déjà créée pour exactement la même VOD
+ * peut être réutilisée.
  *
- * La playlist doit toujours être relue.
- * Safari recharge index.m3u8 pendant la lecture
- * pour découvrir les nouveaux segments.
- *
- * Aucun cache sur le manifeste.
+ * On ne veut surtout pas recréer FFmpeg simplement parce
+ * que Safari / VideoPlayer rappelle l'URL initiale.
  */
+const SESSION_REUSE_MAX_AGE =
+  4 * 60 * 60 * 1000;
+
+/*
+ * Une playlist d'une session active peut ne pas changer
+ * pendant quelques secondes si Xtream est en reconnexion.
+ *
+ * On ne considère donc PAS une session morte uniquement
+ * parce que le manifeste n'a pas été modifié récemment.
+ */
+const SESSION_START_WAIT =
+  15_000;
+
+/* =========================================================
+   HEADERS
+========================================================= */
+
 const HEADERS = {
   "Cache-Control":
     "no-store, no-cache, must-revalidate, proxy-revalidate",
@@ -84,6 +95,97 @@ const HEADERS = {
   "X-Content-Type-Options":
     "nosniff",
 };
+
+/* =========================================================
+   TYPES
+========================================================= */
+
+type HlsProcess =
+  ReturnType<typeof spawn>;
+
+type VodHlsSession = {
+  key: string;
+
+  sessionId: string;
+
+  type:
+    | "movie"
+    | "series";
+
+  id: string;
+
+  ext: string;
+
+  seek: number;
+
+  host: string;
+
+  username: string;
+
+  dir: string;
+
+  playlist: string;
+
+  segmentPattern: string;
+
+  ffmpeg:
+    HlsProcess | null;
+
+  createdAt: number;
+
+  lastAccessAt: number;
+
+  ready: boolean;
+
+  closed: boolean;
+};
+
+/* =========================================================
+   GLOBAL SESSION REGISTRY
+
+   IMPORTANT :
+
+   Next.js peut conserver ce module pendant toute la durée
+   du process Node.
+
+   On place donc le registry dans globalThis afin d'éviter
+   de perdre la référence lors d'un rechargement du module.
+
+   Ce registry sert UNIQUEMENT à éviter plusieurs FFmpeg
+   identiques dans le même process Railway.
+========================================================= */
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __gtvVodHlsSessions:
+    Map<string, VodHlsSession>
+    | undefined;
+
+  // eslint-disable-next-line no-var
+  var __gtvVodHlsSessionIds:
+    Map<string, VodHlsSession>
+    | undefined;
+}
+
+const sessionsByKey =
+  globalThis.__gtvVodHlsSessions ??
+  new Map<
+    string,
+    VodHlsSession
+  >();
+
+const sessionsById =
+  globalThis.__gtvVodHlsSessionIds ??
+  new Map<
+    string,
+    VodHlsSession
+  >();
+
+globalThis.__gtvVodHlsSessions =
+  sessionsByKey;
+
+globalThis.__gtvVodHlsSessionIds =
+  sessionsById;
 
 /* =========================================================
    HELPERS
@@ -132,6 +234,405 @@ async function exists(
 }
 
 /* =========================================================
+   SESSION KEY
+
+   Deux requêtes ne partagent une session QUE si :
+
+   - même serveur Xtream
+   - même utilisateur
+   - même type
+   - même ID
+   - même extension
+   - même seek
+
+   Le mot de passe n'est volontairement pas enregistré
+   dans la clé en clair.
+========================================================= */
+
+function createSessionKey(
+  host: string,
+  username: string,
+  password: string,
+  type:
+    | "movie"
+    | "series",
+  id: string,
+  ext: string,
+  seek: number
+) {
+  const passwordFingerprint =
+    crypto
+      .createHash(
+        "sha256"
+      )
+      .update(
+        password
+      )
+      .digest(
+        "hex"
+      )
+      .slice(
+        0,
+        16
+      );
+
+  return [
+    cleanHost(
+      host
+    ),
+
+    username,
+
+    passwordFingerprint,
+
+    type,
+
+    id,
+
+    ext,
+
+    String(
+      seek
+    ),
+  ].join(
+    "|"
+  );
+}
+
+/* =========================================================
+   SESSION REGISTRY HELPERS
+========================================================= */
+
+function registerSession(
+  session: VodHlsSession
+) {
+  sessionsByKey.set(
+    session.key,
+    session
+  );
+
+  sessionsById.set(
+    session.sessionId,
+    session
+  );
+}
+
+function unregisterSession(
+  session: VodHlsSession
+) {
+  const currentByKey =
+    sessionsByKey.get(
+      session.key
+    );
+
+  /*
+   * Ne surtout pas supprimer une nouvelle session qui aurait
+   * éventuellement remplacé l'ancienne avec la même clé.
+   */
+  if (
+    currentByKey?.sessionId ===
+    session.sessionId
+  ) {
+    sessionsByKey.delete(
+      session.key
+    );
+  }
+
+  const currentById =
+    sessionsById.get(
+      session.sessionId
+    );
+
+  if (
+    currentById?.sessionId ===
+    session.sessionId
+  ) {
+    sessionsById.delete(
+      session.sessionId
+    );
+  }
+}
+
+function processIsAlive(
+  session: VodHlsSession
+) {
+  const ff =
+    session.ffmpeg;
+
+  if (
+    !ff
+  ) {
+    /*
+     * Session enregistrée mais FFmpeg pas encore attaché :
+     * cela correspond à la très courte fenêtre de démarrage.
+     */
+    return !session.closed;
+  }
+
+  return (
+    ff.exitCode === null &&
+    ff.signalCode === null &&
+    !session.closed
+  );
+}
+
+async function sessionHasPlaylist(
+  session: VodHlsSession
+) {
+  if (
+    !(
+      await exists(
+        session.playlist
+      )
+    )
+  ) {
+    return false;
+  }
+
+  try {
+    const manifest =
+      await readFile(
+        session.playlist,
+        "utf8"
+      );
+
+    return playlistIsReady(
+      manifest
+    );
+  } catch {
+    return false;
+  }
+}
+
+/* =========================================================
+   REMOVE SESSION
+
+   killProcess=false :
+   uniquement retirer du registry.
+
+   killProcess=true :
+   destruction explicite de FFmpeg + fichiers.
+========================================================= */
+
+async function removeSession(
+  session: VodHlsSession,
+  options?: {
+    killProcess?: boolean;
+    removeFiles?: boolean;
+    reason?: string;
+  }
+) {
+  const killProcess =
+    options?.killProcess ??
+    false;
+
+  const removeFiles =
+    options?.removeFiles ??
+    false;
+
+  const reason =
+    options?.reason ||
+    "unknown";
+
+  unregisterSession(
+    session
+  );
+
+  if (
+    killProcess
+  ) {
+    const ff =
+      session.ffmpeg;
+
+    if (
+      ff &&
+      ff.exitCode === null &&
+      ff.signalCode === null
+    ) {
+      console.log(
+        `[VOD HLS KILL] session=${session.sessionId} reason=${reason}`
+      );
+
+      try {
+        ff.kill(
+          "SIGKILL"
+        );
+      } catch {}
+    }
+  }
+
+  session.closed =
+    true;
+
+  if (
+    removeFiles
+  ) {
+    await rm(
+      session.dir,
+      {
+        recursive:
+          true,
+
+        force:
+          true,
+      }
+    ).catch(
+      () => {}
+    );
+  }
+}
+
+/* =========================================================
+   PRUNE REGISTRY
+
+   IMPORTANT :
+
+   On ne tue PAS une session simplement parce qu'une nouvelle
+   requête du même film arrive.
+
+   Une session est retirée ici seulement si :
+
+   - le process est déjà fermé
+   - ou elle dépasse la durée maximale prévue
+========================================================= */
+
+async function pruneSessions() {
+  const now =
+    Date.now();
+
+  const sessions =
+    Array.from(
+      sessionsById.values()
+    );
+
+  for (
+    const session
+    of sessions
+  ) {
+    const age =
+      now -
+      session.createdAt;
+
+    if (
+      session.closed ||
+      !processIsAlive(
+        session
+      )
+    ) {
+      await removeSession(
+        session,
+        {
+          killProcess:
+            false,
+
+          removeFiles:
+            false,
+
+          reason:
+            "process-closed",
+        }
+      );
+
+      continue;
+    }
+
+    if (
+      age >
+      SESSION_REUSE_MAX_AGE
+    ) {
+      await removeSession(
+        session,
+        {
+          killProcess:
+            true,
+
+          removeFiles:
+            true,
+
+          reason:
+            "max-age",
+        }
+      );
+    }
+  }
+}
+
+/* =========================================================
+   FIND REUSABLE SESSION
+========================================================= */
+
+async function findReusableSession(
+  key: string
+) {
+  const session =
+    sessionsByKey.get(
+      key
+    );
+
+  if (
+    !session
+  ) {
+    return null;
+  }
+
+  if (
+    session.closed
+  ) {
+    unregisterSession(
+      session
+    );
+
+    return null;
+  }
+
+  if (
+    !processIsAlive(
+      session
+    )
+  ) {
+    console.log(
+      `[VOD HLS REUSE DEAD] session=${session.sessionId}`
+    );
+
+    unregisterSession(
+      session
+    );
+
+    return null;
+  }
+
+  const age =
+    Date.now() -
+    session.createdAt;
+
+  if (
+    age >
+    SESSION_REUSE_MAX_AGE
+  ) {
+    await removeSession(
+      session,
+      {
+        killProcess:
+          true,
+
+        removeFiles:
+          true,
+
+        reason:
+          "reuse-expired",
+      }
+    );
+
+    return null;
+  }
+
+  session.lastAccessAt =
+    Date.now();
+
+  return session;
+}
+
+/* =========================================================
    PLAYLIST VALIDATION
 ========================================================= */
 
@@ -171,7 +672,8 @@ function playlistIsReady(
 
 async function waitForPlaylist(
   playlist: string,
-  timeout = START_TIMEOUT
+  timeout =
+    START_TIMEOUT
 ) {
   const started =
     Date.now();
@@ -204,7 +706,9 @@ async function waitForPlaylist(
     }
 
     await new Promise(
-      (resolve) =>
+      (
+        resolve
+      ) =>
         setTimeout(
           resolve,
           100
@@ -431,9 +935,6 @@ function rewriteManifest(
           return "";
         }
 
-        /*
-         * Conserver toutes les directives HLS.
-         */
         if (
           line.startsWith(
             "#"
@@ -442,9 +943,6 @@ function rewriteManifest(
           return line;
         }
 
-        /*
-         * Seuls les segments MPEG-TS sont réécrits.
-         */
         const cleanLine =
           line.split(
             "?"
@@ -526,6 +1024,71 @@ function manifestResponse(
 }
 
 /* =========================================================
+   CREATE SESSION PLAYLIST URL
+========================================================= */
+
+function createSessionPlaylistUrl(
+  sessionId: string
+) {
+  const target =
+    new URL(
+      "/api/vod-hls",
+      RAILWAY_URL
+    );
+
+  target.searchParams.set(
+    "s",
+    sessionId
+  );
+
+  return target;
+}
+
+/* =========================================================
+   REDIRECT TO EXISTING SESSION
+========================================================= */
+
+function redirectToSession(
+  session: VodHlsSession,
+  reused:
+    boolean
+) {
+  session.lastAccessAt =
+    Date.now();
+
+  const target =
+    createSessionPlaylistUrl(
+      session.sessionId
+    );
+
+  console.log(
+    reused
+      ? `[VOD HLS REUSE] type=${session.type} id=${session.id} seek=${session.seek} session=${session.sessionId}`
+      : `[VOD HLS MANIFEST] session=${session.sessionId} -> ${target.toString()}`
+  );
+
+  return NextResponse.redirect(
+    target,
+    {
+      status: 302,
+
+      headers: {
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, max-age=0",
+
+        "X-GTV-HLS-Session":
+          session.sessionId,
+
+        "X-GTV-HLS-Reused":
+          reused
+            ? "1"
+            : "0",
+      },
+    }
+  );
+}
+
+/* =========================================================
    GET
 ========================================================= */
 
@@ -541,6 +1104,12 @@ export async function GET(
     const {
       searchParams,
     } = url;
+
+    /* =====================================================
+       PRUNE DES ANCIENNES ENTRÉES
+    ===================================================== */
+
+    await pruneSessions();
 
     /* =====================================================
        MODE 1
@@ -571,7 +1140,9 @@ export async function GET(
         return new Response(
           "Session HLS invalide",
           {
-            status: 400,
+            status:
+              400,
+
             headers:
               HEADERS,
           }
@@ -590,15 +1161,29 @@ export async function GET(
           "index.m3u8"
         );
 
+      /*
+       * Si la session appartient au registry local,
+       * on marque son dernier accès.
+       */
+      const registeredSession =
+        sessionsById.get(
+          sessionId
+        );
+
+      if (
+        registeredSession
+      ) {
+        registeredSession.lastAccessAt =
+          Date.now();
+      }
+
       let manifest:
         string;
 
       try {
         /*
-         * Avec temp_file, FFmpeg remplace
-         * index.m3u8 atomiquement.
-         *
-         * On laisse une courte fenêtre à FFmpeg.
+         * La reconnexion Xtream peut momentanément ralentir
+         * FFmpeg, mais le manifeste existant reste valide.
          */
         manifest =
           await waitForPlaylist(
@@ -610,10 +1195,25 @@ export async function GET(
           `[VOD HLS PLAYLIST NOT FOUND] session=${sessionId}`
         );
 
+        /*
+         * Si cette session était connue du registry mais que
+         * son manifeste n'existe réellement plus, on retire
+         * seulement cette entrée.
+         */
+        if (
+          registeredSession
+        ) {
+          unregisterSession(
+            registeredSession
+          );
+        }
+
         return new Response(
           "Session HLS introuvable ou expirée",
           {
-            status: 404,
+            status:
+              404,
+
             headers:
               HEADERS,
           }
@@ -623,10 +1223,15 @@ export async function GET(
       console.log(
         `[VOD HLS PLAYLIST] session=${sessionId}`
       );
-      
+
+      /*
+       * TEMPORAIRE :
+       * garde ce log pendant notre diagnostic iPhone.
+       */
       console.log(
-  `[VOD HLS MANIFEST CONTENT] session=${sessionId}\n${manifest}`
-);
+        `[VOD HLS MANIFEST CONTENT] session=${sessionId}\n${manifest}`
+      );
+
       return manifestResponse(
         manifest,
         sessionId
@@ -635,10 +1240,12 @@ export async function GET(
 
     /* =====================================================
        MODE 2
-       NOUVELLE SESSION
+       DEMANDE DE VOD
     ===================================================== */
 
-    const type =
+    const type:
+      | "movie"
+      | "series" =
       searchParams.get(
         "type"
       ) === "series"
@@ -689,7 +1296,9 @@ export async function GET(
       return new Response(
         "ID manquant",
         {
-          status: 400,
+          status:
+            400,
+
           headers:
             HEADERS,
         }
@@ -731,7 +1340,9 @@ export async function GET(
         return new Response(
           "Non autorisé",
           {
-            status: 401,
+            status:
+              401,
+
             headers:
               HEADERS,
           }
@@ -765,7 +1376,9 @@ export async function GET(
         return new Response(
           "Identifiants Xtream incomplets",
           {
-            status: 400,
+            status:
+              400,
+
             headers:
               HEADERS,
           }
@@ -778,7 +1391,9 @@ export async function GET(
         return new Response(
           "RAILWAY_PUBLIC_URL manquante",
           {
-            status: 500,
+            status:
+              500,
+
             headers:
               HEADERS,
           }
@@ -807,7 +1422,8 @@ export async function GET(
       );
 
       if (
-        seek > 0
+        seek >
+        0
       ) {
         target.searchParams.set(
           "t",
@@ -865,7 +1481,9 @@ export async function GET(
       return new Response(
         "Paramètres Railway incomplets",
         {
-          status: 400,
+          status:
+            400,
+
           headers:
             HEADERS,
         }
@@ -878,16 +1496,66 @@ export async function GET(
       return new Response(
         "RAILWAY_PUBLIC_URL manquante",
         {
-          status: 500,
+          status:
+            500,
+
           headers:
             HEADERS,
         }
       );
     }
 
+    /* =====================================================
+       SESSION KEY
+    ===================================================== */
+
+    const sessionKey =
+      createSessionKey(
+        host,
+        username,
+        password,
+        type,
+        id,
+        ext,
+        seek
+      );
+
+    /* =====================================================
+       RÉUTILISATION
+
+       C'EST LA CORRECTION PRINCIPALE.
+
+       Avant :
+       chaque appel créait immédiatement randomUUID().
+
+       Maintenant :
+       on cherche d'abord une session active identique.
+    ===================================================== */
+
+    const reusableSession =
+      await findReusableSession(
+        sessionKey
+      );
+
+    if (
+      reusableSession
+    ) {
+      console.log(
+        `[VOD HLS REUSE REQUEST] type=${type} id=${id} seek=${seek} session=${reusableSession.sessionId} ready=${reusableSession.ready ? 1 : 0}`
+      );
+
+      return redirectToSession(
+        reusableSession,
+        true
+      );
+    }
+
+    /* =====================================================
+       INPUT XTREAM
+    ===================================================== */
+
     const folder =
-      type ===
-      "series"
+      type === "series"
         ? "series"
         : "movie";
 
@@ -904,7 +1572,10 @@ export async function GET(
       )}.${ext}`;
 
     /* =====================================================
-       SESSION HLS
+       NOUVELLE SESSION HLS
+
+       On arrive ici UNIQUEMENT si aucune session identique
+       encore active n'a été trouvée.
     ===================================================== */
 
     const sessionId =
@@ -938,9 +1609,67 @@ export async function GET(
         "seg-%06d.ts"
       );
 
-    /* =====================================================
+    /*
+     * IMPORTANT :
+     *
+     * On enregistre la session AVANT spawn().
+     *
+     * Ainsi, si un deuxième GET identique arrive pendant
+     * les quelques secondes nécessaires au démarrage FFmpeg,
+     * il voit déjà cette session et ne lance pas FFmpeg #2.
+     */
+    const vodSession:
+      VodHlsSession = {
+        key:
+          sessionKey,
+
+        sessionId,
+
+        type,
+
+        id,
+
+        ext,
+
+        seek,
+
+        host,
+
+        username,
+
+        dir,
+
+        playlist,
+
+        segmentPattern,
+
+        ffmpeg:
+          null,
+
+        createdAt:
+          Date.now(),
+
+        lastAccessAt:
+          Date.now(),
+
+        ready:
+          false,
+
+        closed:
+          false,
+      };
+
+    registerSession(
+      vodSession
+    );
+
+    console.log(
+      `[VOD HLS SESSION REGISTER] type=${type} id=${id} seek=${seek} session=${sessionId}`
+    );
+
+    /* =========================================================
        CONTINUE DIRECTEMENT AVEC PARTIE 2 / 3
-    ===================================================== */
+    ========================================================= */
       /* =====================================================
        FFMPEG
        APPLE HLS
@@ -954,6 +1683,7 @@ export async function GET(
        - keyframe toutes les 2 secondes
        - timeline HLS stable
        - reconnexion Xtream sans recréer la session
+       - réutilisation d'une session existante
        - aucun GOP fixe dépendant du framerate
     ===================================================== */
 
@@ -1003,15 +1733,14 @@ export async function GET(
       "4xx,5xx",
 
       /*
-       * Plusieurs coupures ont été observées
+       * Plusieurs coupures peuvent arriver
        * pendant une même VOD.
        */
       "-reconnect_max_retries",
       "50",
 
       /*
-       * On évite une attente exponentielle
-       * trop importante entre deux tentatives.
+       * Pas d'attente exponentielle trop longue.
        */
       "-reconnect_delay_max",
       "2",
@@ -1024,15 +1753,8 @@ export async function GET(
       ----------------------------- */
 
       /*
-       * IMPORTANT :
-       *
-       * On ne force plus +genpts ici.
-       *
-       * Les logs ont montré que l'input Xtream
-       * reprend après les coupures HTTP.
-       *
-       * On laisse donc le demuxer conserver
-       * les timestamps de la VOD.
+       * On conserve les timestamps de la VOD.
+       * Pas de +genpts ici.
        */
       "-fflags",
       "+discardcorrupt",
@@ -1073,10 +1795,6 @@ export async function GET(
       "-map",
       "0:a:0?",
 
-      /*
-       * Aucun sous-titre / attachment /
-       * flux secondaire dans le HLS Safari.
-       */
       "-sn",
       "-dn",
 
@@ -1090,9 +1808,6 @@ export async function GET(
       "-preset",
       "ultrafast",
 
-      /*
-       * Profil compatible iPhone / Safari.
-       */
       "-profile:v",
       "main",
 
@@ -1104,7 +1819,7 @@ export async function GET(
 
       /*
        * Maximum 1080p.
-       * Aucun upscale forcé.
+       * Pas d'upscale au-delà du ratio source.
        */
       "-vf",
       "scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2",
@@ -1116,28 +1831,12 @@ export async function GET(
          KEYFRAMES
       ----------------------------- */
 
-      /*
-       * On évite les keyframes supplémentaires
-       * sur changement de scène afin que les
-       * frontières HLS restent prévisibles.
-       */
       "-sc_threshold",
       "0",
 
       /*
-       * Une keyframe toutes les 2 secondes,
+       * Une image clé toutes les deux secondes,
        * indépendamment du framerate source.
-       *
-       * IMPORTANT :
-       *
-       * on a volontairement supprimé :
-       *
-       *   -g 60
-       *   -keyint_min 60
-       *
-       * car une source 23.976 / 24 / 25 fps
-       * ne doit pas recevoir un GOP supposant
-       * arbitrairement 30 fps.
        */
       "-force_key_frames",
       "expr:gte(t,n_forced*2)",
@@ -1158,10 +1857,6 @@ export async function GET(
       "-ar",
       "48000",
 
-      /*
-       * Maintient l'audio aligné avec
-       * la timeline de sortie.
-       */
       "-af",
       "aresample=async=1:first_pts=0",
 
@@ -1169,27 +1864,8 @@ export async function GET(
          TIMESTAMPS
       ----------------------------- */
 
-      /*
-       * Les timestamps négatifs éventuels
-       * sont déplacés dans une plage exploitable.
-       *
-       * On conserve cette protection,
-       * mais on ne force plus -start_at_zero.
-       */
       "-avoid_negative_ts",
       "make_non_negative",
-
-      /*
-       * IMPORTANT :
-       *
-       * SUPPRIMÉ :
-       *
-       *   -start_at_zero
-       *
-       * Cette option n'apporte rien ici sans
-       * une stratégie copyts et pouvait rendre
-       * le traitement de la timeline ambigu.
-       */
 
       /* -----------------------------
          HLS
@@ -1198,19 +1874,11 @@ export async function GET(
       "-f",
       "hls",
 
-      /*
-       * Cible : environ 2 secondes
-       * par segment.
-       */
       "-hls_time",
       "2",
 
       /*
        * Playlist EVENT complète.
-       *
-       * Aucun segment historique n'est retiré :
-       * nécessaire pour une VOD progressive
-       * et pour les seeks arrière.
        */
       "-hls_list_size",
       "0",
@@ -1219,46 +1887,18 @@ export async function GET(
       "event",
 
       /*
-       * IMPORTANT :
-       *
-       * independent_segments :
-       * les segments commencent sur une
-       * image clé.
-       *
-       * temp_file :
-       * Safari ne peut pas récupérer un
-       * segment pendant son écriture.
-       *
-       * PAS de append_list.
+       * temp_file empêche Safari de récupérer
+       * un segment encore en cours d'écriture.
        */
       "-hls_flags",
       "independent_segments+temp_file",
 
-      /*
-       * Segments MPEG-TS pour le HLS natif
-       * Safari.
-       */
       "-hls_segment_type",
       "mpegts",
 
-      /*
-       * Numérotation monotone depuis zéro.
-       */
       "-start_number",
       "0",
 
-      /*
-       * IMPORTANT :
-       *
-       * On ne passe plus :
-       *
-       *   -mpegts_flags +resend_headers
-       *
-       * au muxer HLS principal.
-       *
-       * Le muxer HLS contrôle lui-même
-       * la création des segments MPEG-TS.
-       */
       "-hls_segment_filename",
       segmentPattern,
 
@@ -1270,7 +1910,7 @@ export async function GET(
     );
 
     console.log(
-      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128 safari=1 timeline=stable-v2`
+      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128 safari=1 timeline=stable-v3 reuse=1`
     );
 
     /* =====================================================
@@ -1291,14 +1931,23 @@ export async function GET(
         }
       );
 
-    let stderr = "";
+    /*
+     * IMPORTANT :
+     *
+     * La session a été enregistrée AVANT spawn().
+     * On attache maintenant le process réel.
+     */
+    vodSession.ffmpeg =
+      ff;
+
+    let stderr =
+      "";
 
     /*
-     * FFmpeg doit continuer à fonctionner
-     * après le redirect de la requête initiale.
+     * FFmpeg continue après la fin de la requête HTTP.
      *
-     * Il n'est donc volontairement PAS lié
-     * au AbortSignal de req.
+     * Il n'est volontairement PAS lié au AbortSignal
+     * de req.
      */
 
     ff.stderr.on(
@@ -1355,6 +2004,22 @@ export async function GET(
         code,
         signal
       ) => {
+        /*
+         * IMPORTANT :
+         *
+         * close() signifie que CE process FFmpeg
+         * n'est plus réutilisable.
+         */
+        vodSession.closed =
+          true;
+
+        vodSession.ready =
+          false;
+
+        unregisterSession(
+          vodSession
+        );
+
         console.log(
           `[VOD HLS CLOSED] type=${type} id=${id} session=${sessionId} code=${code} signal=${signal}`
         );
@@ -1366,6 +2031,15 @@ export async function GET(
             `[VOD HLS STDERR] type=${type} id=${id}\n${stderr}`
           );
         }
+
+        /*
+         * On ne supprime PAS immédiatement les fichiers.
+         *
+         * Safari peut encore avoir quelques requêtes de
+         * segments déjà générés en vol au moment du close.
+         *
+         * Le cleanup différé s'en chargera.
+         */
       }
     );
 
@@ -1384,9 +2058,29 @@ export async function GET(
     } catch (
       error
     ) {
+      console.error(
+        `[VOD HLS STARTUP FAILED] type=${type} id=${id} session=${sessionId}`
+      );
+
       /*
-       * FFmpeg n'est tué ici que si la création
-       * initiale du HLS a réellement échoué.
+       * Retirer immédiatement cette session du registry.
+       *
+       * Une prochaine requête identique pourra alors
+       * créer proprement une nouvelle session.
+       */
+      unregisterSession(
+        vodSession
+      );
+
+      vodSession.closed =
+        true;
+
+      vodSession.ready =
+        false;
+
+      /*
+       * FFmpeg n'est tué que si le démarrage initial
+       * a réellement échoué.
        */
       if (
         ff.exitCode ===
@@ -1394,8 +2088,8 @@ export async function GET(
         ff.signalCode ===
           null
       ) {
-        console.error(
-          `[VOD HLS STARTUP TIMEOUT] type=${type} id=${id} session=${sessionId}`
+        console.log(
+          `[VOD HLS KILL] session=${sessionId} reason=startup-failed`
         );
 
         try {
@@ -1448,12 +2142,26 @@ export async function GET(
         initialManifest
       )
     ) {
+      unregisterSession(
+        vodSession
+      );
+
+      vodSession.closed =
+        true;
+
+      vodSession.ready =
+        false;
+
       if (
         ff.exitCode ===
           null &&
         ff.signalCode ===
           null
       ) {
+        console.log(
+          `[VOD HLS KILL] session=${sessionId} reason=invalid-initial-playlist`
+        );
+
         try {
           ff.kill(
             "SIGKILL"
@@ -1480,8 +2188,17 @@ export async function GET(
     }
 
     /*
+     * Session officiellement prête.
+     */
+    vodSession.ready =
+      true;
+
+    vodSession.lastAccessAt =
+      Date.now();
+
+    /*
      * Compte les segments présents lorsque
-     * Safari reçoit le manifeste initial.
+     * Safari reçoit le premier manifeste.
      */
     const initialSegments =
       initialManifest
@@ -1503,47 +2220,52 @@ export async function GET(
     );
 
     /* =====================================================
-       URL PUBLIQUE DU MANIFESTE
-    ===================================================== */
-
-    const sessionPlaylistUrl =
-      new URL(
-        "/api/vod-hls",
-        RAILWAY_URL
-      );
-
-    sessionPlaylistUrl
-      .searchParams
-      .set(
-        "s",
-        sessionId
-      );
-
-    /* =====================================================
        CLEANUP
+
+       IMPORTANT :
+
+       Ce timer appartient exclusivement à CETTE session.
+
+       Il ne doit jamais supprimer du registry une éventuelle
+       session plus récente possédant la même sessionKey.
     ===================================================== */
 
-    /*
-     * Une session VOD peut rester plusieurs heures.
-     *
-     * La fin de la requête HTTP initiale ne doit
-     * surtout pas tuer FFmpeg.
-     */
     const cleanup =
       setTimeout(
         async () => {
-          try {
-            if (
-              ff.exitCode ===
-                null &&
-              ff.signalCode ===
-                null
-            ) {
+          /*
+           * unregisterSession() vérifie le sessionId avant
+           * de supprimer sessionsByKey.
+           *
+           * Une session plus récente avec la même clé ne sera
+           * donc jamais supprimée par cet ancien timer.
+           */
+          unregisterSession(
+            vodSession
+          );
+
+          vodSession.ready =
+            false;
+
+          vodSession.closed =
+            true;
+
+          if (
+            ff.exitCode ===
+              null &&
+            ff.signalCode ===
+              null
+          ) {
+            console.log(
+              `[VOD HLS KILL] session=${sessionId} reason=4h-cleanup`
+            );
+
+            try {
               ff.kill(
                 "SIGKILL"
               );
-            }
-          } catch {}
+            } catch {}
+          }
 
           await rm(
             dir,
@@ -1563,10 +2285,7 @@ export async function GET(
           );
         },
 
-        4 *
-          60 *
-          60 *
-          1000
+        SESSION_REUSE_MAX_AGE
       );
 
     cleanup.unref?.();
@@ -1579,28 +2298,15 @@ export async function GET(
       `[VOD HLS READY] type=${type} id=${id} session=${sessionId}`
     );
 
-    console.log(
-      `[VOD HLS MANIFEST] session=${sessionId} -> ${sessionPlaylistUrl.toString()}`
-    );
-
     /*
-     * Safari reste ensuite sur :
+     * On utilise le helper commun.
      *
-     * /api/vod-hls?s=SESSION
-     *
-     * Cette URL relit le manifeste généré par
-     * CE même process FFmpeg.
+     * reused=false :
+     * c'est la session qui vient réellement d'être créée.
      */
-    return NextResponse.redirect(
-      sessionPlaylistUrl,
-      {
-        status: 302,
-
-        headers: {
-          "Cache-Control":
-            "no-store, no-cache, must-revalidate, max-age=0",
-        },
-      }
+    return redirectToSession(
+      vodSession,
+      false
     );
 
   } catch (
@@ -1617,7 +2323,8 @@ export async function GET(
         "unknown"
       }`,
       {
-        status: 500,
+        status:
+          500,
 
         headers:
           HEADERS,
@@ -1636,8 +2343,15 @@ export async function GET(
    avant ou pendant la lecture du manifeste.
 
    IMPORTANT :
-   une requête HEAD sans session ne doit jamais
-   démarrer une nouvelle instance FFmpeg.
+
+   - HEAD avec ?s=SESSION :
+     vérifie la session existante.
+
+   - HEAD sans ?s= :
+     confirme seulement que la route existe.
+
+   - HEAD ne crée JAMAIS de session.
+   - HEAD ne démarre JAMAIS FFmpeg.
 ========================================================= */
 
 export async function HEAD(
@@ -1677,12 +2391,32 @@ export async function HEAD(
         return new Response(
           null,
           {
-            status: 400,
+            status:
+              400,
 
             headers:
               HEADERS,
           }
         );
+      }
+
+      /*
+       * Le registry n'est pas obligatoire ici.
+       *
+       * Même si le process Next a perdu son registry,
+       * les fichiers HLS présents dans /tmp peuvent encore
+       * être servis.
+       */
+      const registeredSession =
+        sessionsById.get(
+          sessionId
+        );
+
+      if (
+        registeredSession
+      ) {
+        registeredSession.lastAccessAt =
+          Date.now();
       }
 
       const dir =
@@ -1702,12 +2436,10 @@ export async function HEAD(
 
       try {
         /*
-         * Avec temp_file, FFmpeg peut être
-         * précisément entre l'écriture du .tmp
-         * et son rename atomique.
+         * FFmpeg écrit le manifeste avec temp_file.
          *
-         * On laisse donc une courte fenêtre
-         * avant de considérer la session absente.
+         * Il peut donc se trouver brièvement entre
+         * l'écriture du fichier temporaire et son rename.
          */
         manifest =
           await waitForPlaylist(
@@ -1719,10 +2451,24 @@ export async function HEAD(
           `[VOD HLS HEAD NOT FOUND] session=${sessionId}`
         );
 
+        /*
+         * Si la session était enregistrée mais que son
+         * manifeste n'existe plus, elle ne doit plus être
+         * proposée pour une réutilisation future.
+         */
+        if (
+          registeredSession
+        ) {
+          unregisterSession(
+            registeredSession
+          );
+        }
+
         return new Response(
           null,
           {
-            status: 404,
+            status:
+              404,
 
             headers:
               HEADERS,
@@ -1736,10 +2482,15 @@ export async function HEAD(
           sessionId
         );
 
+      console.log(
+        `[VOD HLS HEAD] session=${sessionId} registered=${registeredSession ? 1 : 0}`
+      );
+
       return new Response(
         null,
         {
-          status: 200,
+          status:
+            200,
 
           headers: {
             ...HEADERS,
@@ -1755,10 +2506,6 @@ export async function HEAD(
                 )
               ),
 
-            /*
-             * Safari doit toujours revalider
-             * le manifeste EVENT.
-             */
             "Cache-Control":
               "no-store, no-cache, must-revalidate, max-age=0",
 
@@ -1767,6 +2514,11 @@ export async function HEAD(
 
             "X-GTV-Session":
               sessionId,
+
+            "X-GTV-HLS-Registered":
+              registeredSession
+                ? "1"
+                : "0",
 
             "X-GTV-Manifest-Time":
               String(
@@ -1780,14 +2532,21 @@ export async function HEAD(
     /* =====================================================
        HEAD SANS SESSION
 
-       La route existe mais on ne démarre surtout
-       pas FFmpeg pour une simple requête HEAD.
+       IMPORTANT :
+
+       Ne jamais :
+       - appeler requireSession()
+       - rediriger vers Railway
+       - créer randomUUID()
+       - créer un dossier
+       - lancer FFmpeg
     ===================================================== */
 
     return new Response(
       null,
       {
-        status: 200,
+        status:
+          200,
 
         headers: {
           ...HEADERS,
@@ -1815,7 +2574,8 @@ export async function HEAD(
     return new Response(
       null,
       {
-        status: 500,
+        status:
+          500,
 
         headers:
           HEADERS,
@@ -1834,7 +2594,8 @@ export async function OPTIONS() {
   return new Response(
     null,
     {
-      status: 204,
+      status:
+        204,
 
       headers: {
         ...HEADERS,
@@ -1846,7 +2607,7 @@ export async function OPTIONS() {
           "Range, Content-Type, Accept",
 
         "Access-Control-Expose-Headers":
-          "Content-Length, Content-Range, Accept-Ranges",
+          "Content-Length, Content-Range, Accept-Ranges, X-GTV-Mode, X-GTV-Session, X-GTV-HLS-Session, X-GTV-HLS-Reused, X-GTV-HLS-Registered",
 
         "Access-Control-Max-Age":
           "86400",
