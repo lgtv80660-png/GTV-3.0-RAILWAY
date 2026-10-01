@@ -623,7 +623,10 @@ export async function GET(
       console.log(
         `[VOD HLS PLAYLIST] session=${sessionId}`
       );
-
+      
+      console.log(
+  `[VOD HLS MANIFEST CONTENT] session=${sessionId}\n${manifest}`
+);
       return manifestResponse(
         manifest,
         sessionId
