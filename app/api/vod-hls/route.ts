@@ -54,13 +54,13 @@ const START_TIMEOUT =
   45_000;
 
 /*
- * IMPORTANT SAFARI
+ * SAFARI / HLS
  *
- * Le manifeste HLS doit toujours être relu.
- * Safari recharge régulièrement index.m3u8
+ * La playlist doit toujours être relue.
+ * Safari recharge index.m3u8 pendant la lecture
  * pour découvrir les nouveaux segments.
  *
- * Aucun cache ici.
+ * Aucun cache sur le manifeste.
  */
 const HEADERS = {
   "Cache-Control":
@@ -121,7 +121,9 @@ async function exists(
   file: string
 ) {
   try {
-    await stat(file);
+    await stat(
+      file
+    );
 
     return true;
   } catch {
@@ -152,9 +154,6 @@ function playlistIsReady(
     return false;
   }
 
-  /*
-   * Au moins un segment réellement publié.
-   */
   if (
     !/seg-\d+\.ts/i.test(
       content
@@ -250,7 +249,9 @@ async function waitForHlsStartup(
         callback:
           () => void
       ) => {
-        if (finished) {
+        if (
+          finished
+        ) {
           return;
         }
 
@@ -267,7 +268,9 @@ async function waitForHlsStartup(
       const timer =
         setInterval(
           async () => {
-            if (finished) {
+            if (
+              finished
+            ) {
               return;
             }
 
@@ -346,7 +349,9 @@ async function waitForHlsStartup(
           code,
           signal
         ) => {
-          if (finished) {
+          if (
+            finished
+          ) {
             return;
           }
 
@@ -401,12 +406,6 @@ function rewriteManifest(
   manifest: string,
   sessionId: string
 ) {
-  /*
-   * On normalise les fins de lignes.
-   *
-   * Safari est plus sensible que hls.js aux
-   * playlists modifiées à la volée.
-   */
   const normalized =
     manifest.replace(
       /\r\n/g,
@@ -426,13 +425,14 @@ function rewriteManifest(
         const line =
           rawLine.trim();
 
-        if (!line) {
+        if (
+          !line
+        ) {
           return "";
         }
 
         /*
-         * Toutes les directives HLS
-         * sont conservées exactement.
+         * Conserver toutes les directives HLS.
          */
         if (
           line.startsWith(
@@ -443,7 +443,7 @@ function rewriteManifest(
         }
 
         /*
-         * On ne transforme que les segments TS.
+         * Seuls les segments MPEG-TS sont réécrits.
          */
         const cleanLine =
           line.split(
@@ -475,10 +475,6 @@ function rewriteManifest(
       }
     );
 
-  /*
-   * Une playlist texte HLS doit terminer
-   * proprement par un retour à la ligne.
-   */
   return (
     rewritten.join(
       "\n"
@@ -511,9 +507,6 @@ function manifestResponse(
         "Content-Type":
           "application/vnd.apple.mpegurl; charset=utf-8",
 
-        /*
-         * Safari doit revalider cette playlist.
-         */
         "Cache-Control":
           "no-store, no-cache, must-revalidate, max-age=0",
 
@@ -551,15 +544,7 @@ export async function GET(
 
     /* =====================================================
        MODE 1
-
        PLAYLIST D'UNE SESSION EXISTANTE
-
-       Safari appelle régulièrement :
-
-       /api/vod-hls?s=SESSION
-
-       IMPORTANT :
-       on relit index.m3u8 à CHAQUE requête.
     ===================================================== */
 
     const requestedSession =
@@ -587,7 +572,6 @@ export async function GET(
           "Session HLS invalide",
           {
             status: 400,
-
             headers:
               HEADERS,
           }
@@ -611,11 +595,10 @@ export async function GET(
 
       try {
         /*
-         * Le fichier peut momentanément être remplacé
-         * par FFmpeg à cause de hls_flags=temp_file.
+         * Avec temp_file, FFmpeg remplace
+         * index.m3u8 atomiquement.
          *
-         * waitForPlaylist() laisse donc une petite
-         * fenêtre au rename atomique.
+         * On laisse une courte fenêtre à FFmpeg.
          */
         manifest =
           await waitForPlaylist(
@@ -631,7 +614,6 @@ export async function GET(
           "Session HLS introuvable ou expirée",
           {
             status: 404,
-
             headers:
               HEADERS,
           }
@@ -698,12 +680,13 @@ export async function GET(
           )
         : 0;
 
-    if (!id) {
+    if (
+      !id
+    ) {
       return new Response(
         "ID manquant",
         {
           status: 400,
-
           headers:
             HEADERS,
         }
@@ -746,7 +729,6 @@ export async function GET(
           "Non autorisé",
           {
             status: 401,
-
             headers:
               HEADERS,
           }
@@ -781,7 +763,6 @@ export async function GET(
           "Identifiants Xtream incomplets",
           {
             status: 400,
-
             headers:
               HEADERS,
           }
@@ -795,7 +776,6 @@ export async function GET(
           "RAILWAY_PUBLIC_URL manquante",
           {
             status: 500,
-
             headers:
               HEADERS,
           }
@@ -883,7 +863,6 @@ export async function GET(
         "Paramètres Railway incomplets",
         {
           status: 400,
-
           headers:
             HEADERS,
         }
@@ -897,7 +876,6 @@ export async function GET(
         "RAILWAY_PUBLIC_URL manquante",
         {
           status: 500,
-
           headers:
             HEADERS,
         }
@@ -958,7 +936,7 @@ export async function GET(
       );
 
     /* =====================================================
-       SUITE DANS PARTIE 2 / 3
+       CONTINUE DIRECTEMENT AVEC PARTIE 2 / 3
     ===================================================== */
       /* =====================================================
        FFMPEG
@@ -969,11 +947,11 @@ export async function GET(
        - H264 compatible Safari
        - AAC stéréo
        - YUV420P
-       - GOP régulier
+       - segments MPEG-TS indépendants
        - keyframe toutes les 2 secondes
-       - segments TS indépendants
-       - timestamps continus
-       - playlist mise à jour pendant l'encodage
+       - timeline HLS stable
+       - reconnexion Xtream sans recréer la session
+       - aucun GOP fixe dépendant du framerate
     ===================================================== */
 
     const args = [
@@ -991,9 +969,17 @@ export async function GET(
       "-user_agent",
       UA,
 
+      /*
+       * Timeout lecture réseau :
+       * 15 secondes.
+       */
       "-rw_timeout",
       "15000000",
 
+      /*
+       * Reconnexion automatique lorsque
+       * Xtream ferme prématurément la connexion.
+       */
       "-reconnect",
       "1",
 
@@ -1001,9 +987,8 @@ export async function GET(
       "1",
 
       /*
-       * Pour une VOD connue, un EOF réel ne doit pas
-       * être considéré comme la fin tant que l'upstream
-       * annonce encore des données.
+       * L'upstream Xtream annonce une taille
+       * complète puis coupe parfois avant la fin.
        */
       "-reconnect_at_eof",
       "1",
@@ -1015,15 +1000,15 @@ export async function GET(
       "4xx,5xx",
 
       /*
-       * Versions FFmpeg récentes :
-       * autorise de nombreuses reprises successives.
+       * Plusieurs coupures ont été observées
+       * pendant une même VOD.
        */
       "-reconnect_max_retries",
       "50",
 
       /*
-       * Ne pas laisser l'attente exponentielle devenir
-       * trop longue : Safari possède un buffer limité.
+       * On évite une attente exponentielle
+       * trop importante entre deux tentatives.
        */
       "-reconnect_delay_max",
       "2",
@@ -1031,12 +1016,23 @@ export async function GET(
       "-reconnect_delay_total_max",
       "300",
 
+      /* -----------------------------
+         ANALYSE INPUT
+      ----------------------------- */
+
       /*
-       * Génération de timestamps propres
-       * et rejet des paquets corrompus.
+       * IMPORTANT :
+       *
+       * On ne force plus +genpts ici.
+       *
+       * Les logs ont montré que l'input Xtream
+       * reprend après les coupures HTTP.
+       *
+       * On laisse donc le demuxer conserver
+       * les timestamps de la VOD.
        */
       "-fflags",
-      "+genpts+discardcorrupt",
+      "+discardcorrupt",
 
       "-analyzeduration",
       "10000000",
@@ -1075,12 +1071,9 @@ export async function GET(
       "0:a:0?",
 
       /*
-       * Ne jamais laisser passer
-       * les attachments MKV,
-       * sous-titres intégrés ou
-       * autres streams non nécessaires.
+       * Aucun sous-titre / attachment /
+       * flux secondaire dans le HLS Safari.
        */
-
       "-sn",
       "-dn",
 
@@ -1095,8 +1088,7 @@ export async function GET(
       "ultrafast",
 
       /*
-       * Main 4.1 est largement
-       * compatible avec Safari/iPhone.
+       * Profil compatible iPhone / Safari.
        */
       "-profile:v",
       "main",
@@ -1109,7 +1101,7 @@ export async function GET(
 
       /*
        * Maximum 1080p.
-       * Pas d'upscale forcé.
+       * Aucun upscale forcé.
        */
       "-vf",
       "scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2",
@@ -1118,38 +1110,34 @@ export async function GET(
       "23",
 
       /* -----------------------------
-         GOP / KEYFRAMES
+         KEYFRAMES
       ----------------------------- */
 
       /*
-       * On désactive les keyframes
-       * automatiques liées aux changements
-       * de scène.
+       * On évite les keyframes supplémentaires
+       * sur changement de scène afin que les
+       * frontières HLS restent prévisibles.
        */
       "-sc_threshold",
       "0",
 
       /*
-       * Segment = 2 secondes.
-       * On force donc une keyframe
-       * toutes les 2 secondes.
+       * Une keyframe toutes les 2 secondes,
+       * indépendamment du framerate source.
+       *
+       * IMPORTANT :
+       *
+       * on a volontairement supprimé :
+       *
+       *   -g 60
+       *   -keyint_min 60
+       *
+       * car une source 23.976 / 24 / 25 fps
+       * ne doit pas recevoir un GOP supposant
+       * arbitrairement 30 fps.
        */
       "-force_key_frames",
       "expr:gte(t,n_forced*2)",
-
-      /*
-       * GOP explicite.
-       *
-       * 60 correspond à 2 secondes
-       * pour une source proche de 30 fps.
-       * force_key_frames reste l'autorité
-       * principale pour les autres fps.
-       */
-      "-g",
-      "60",
-
-      "-keyint_min",
-      "60",
 
       /* -----------------------------
          AUDIO
@@ -1168,9 +1156,8 @@ export async function GET(
       "48000",
 
       /*
-       * Resynchronise l'audio en cas
-       * de timestamps irréguliers de
-       * l'upstream Xtream.
+       * Maintient l'audio aligné avec
+       * la timeline de sortie.
        */
       "-af",
       "aresample=async=1:first_pts=0",
@@ -1179,28 +1166,27 @@ export async function GET(
          TIMESTAMPS
       ----------------------------- */
 
+      /*
+       * Les timestamps négatifs éventuels
+       * sont déplacés dans une plage exploitable.
+       *
+       * On conserve cette protection,
+       * mais on ne force plus -start_at_zero.
+       */
       "-avoid_negative_ts",
-      "make_zero",
+      "make_non_negative",
 
       /*
-       * Safari tolère beaucoup moins
-       * bien les discontinuités temporelles
-       * entre les segments qu'un lecteur
-       * desktop.
+       * IMPORTANT :
+       *
+       * SUPPRIMÉ :
+       *
+       *   -start_at_zero
+       *
+       * Cette option n'apporte rien ici sans
+       * une stratégie copyts et pouvait rendre
+       * le traitement de la timeline ambigu.
        */
-      "-start_at_zero",
-
-      /* -----------------------------
-         MPEG-TS
-      ----------------------------- */
-
-      /*
-       * Réémission régulière des headers
-       * MPEG-TS pour que chaque segment
-       * soit décodable indépendamment.
-       */
-      "-mpegts_flags",
-      "+resend_headers",
 
       /* -----------------------------
          HLS
@@ -1210,55 +1196,66 @@ export async function GET(
       "hls",
 
       /*
-       * Segments courts pour réduire
-       * le délai de démarrage.
+       * Cible : environ 2 secondes
+       * par segment.
        */
       "-hls_time",
       "2",
 
       /*
-       * On conserve la playlist entière
-       * pour une VOD en cours de génération.
+       * Playlist EVENT complète.
+       *
+       * Aucun segment historique n'est retiré :
+       * nécessaire pour une VOD progressive
+       * et pour les seeks arrière.
        */
       "-hls_list_size",
       "0",
 
-      /*
-       * EVENT :
-       * la playlist grandit au fur et à
-       * mesure que FFmpeg produit les
-       * nouveaux segments.
-       */
       "-hls_playlist_type",
       "event",
 
       /*
+       * IMPORTANT :
+       *
        * independent_segments :
-       * indique à Safari que chaque segment
-       * commence sur une image clé.
+       * les segments commencent sur une
+       * image clé.
        *
        * temp_file :
-       * FFmpeg écrit d'abord .tmp puis
-       * effectue un rename atomique.
-       * Safari ne peut donc pas télécharger
-       * un segment encore incomplet.
+       * Safari ne peut pas récupérer un
+       * segment pendant son écriture.
        *
-       * append_list :
-       * conserve correctement la continuité
-       * de la playlist.
+       * PAS de append_list.
        */
       "-hls_flags",
       "independent_segments+temp_file",
 
       /*
-       * MPEG-TS explicite.
+       * Segments MPEG-TS pour le HLS natif
+       * Safari.
        */
       "-hls_segment_type",
       "mpegts",
 
+      /*
+       * Numérotation monotone depuis zéro.
+       */
       "-start_number",
       "0",
 
+      /*
+       * IMPORTANT :
+       *
+       * On ne passe plus :
+       *
+       *   -mpegts_flags +resend_headers
+       *
+       * au muxer HLS principal.
+       *
+       * Le muxer HLS contrôle lui-même
+       * la création des segments MPEG-TS.
+       */
       "-hls_segment_filename",
       segmentPattern,
 
@@ -1270,7 +1267,7 @@ export async function GET(
     );
 
     console.log(
-      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128 safari=1`
+      `[VOD HLS PROFILE] id=${id} codec=h264 preset=ultrafast max=1920x1080 hls=2s audio=aac128 safari=1 timeline=stable-v2`
     );
 
     /* =====================================================
@@ -1294,14 +1291,11 @@ export async function GET(
     let stderr = "";
 
     /*
-     * Important :
+     * FFmpeg doit continuer à fonctionner
+     * après le redirect de la requête initiale.
      *
-     * Le process FFmpeg doit continuer
-     * après que cette requête HTTP initiale
-     * a renvoyé son redirect.
-     *
-     * On ne lie donc pas son cycle de vie
-     * au signal AbortSignal de req.
+     * Il n'est donc volontairement PAS lié
+     * au AbortSignal de req.
      */
 
     ff.stderr.on(
@@ -1326,10 +1320,10 @@ export async function GET(
         }
 
         /*
-         * Logs importants seulement.
+         * Logs importants uniquement.
          */
         if (
-          /error|failed|invalid|unsupported|could not|conversion failed|no space|killed|prematurely|reconnect/i.test(
+          /error|failed|invalid|unsupported|could not|conversion failed|no space|killed|prematurely|reconnect|timestamp|non-monotonous|discontinuity/i.test(
             text
           )
         ) {
@@ -1373,7 +1367,7 @@ export async function GET(
     );
 
     /* =====================================================
-       ATTENTE PREMIER SEGMENT
+       ATTENTE DÉMARRAGE HLS
     ===================================================== */
 
     try {
@@ -1388,9 +1382,8 @@ export async function GET(
       error
     ) {
       /*
-       * On tue FFmpeg uniquement si
-       * le démarrage HLS a réellement
-       * échoué.
+       * FFmpeg n'est tué ici que si la création
+       * initiale du HLS a réellement échoué.
        */
       if (
         ff.exitCode ===
@@ -1484,10 +1477,8 @@ export async function GET(
     }
 
     /*
-     * Log utile pour le prochain test iPhone.
-     *
-     * Cela permet de voir combien de segments
-     * existaient au moment où Safari a commencé.
+     * Compte les segments présents lorsque
+     * Safari reçoit le manifeste initial.
      */
     const initialSegments =
       initialManifest
@@ -1532,10 +1523,8 @@ export async function GET(
     /*
      * Une session VOD peut rester plusieurs heures.
      *
-     * IMPORTANT :
-     * ne jamais supprimer le dossier ou tuer FFmpeg
-     * après quelques secondes/minutes simplement parce
-     * que la requête HTTP initiale est terminée.
+     * La fin de la requête HTTP initiale ne doit
+     * surtout pas tuer FFmpeg.
      */
     const cleanup =
       setTimeout(
@@ -1591,17 +1580,14 @@ export async function GET(
       `[VOD HLS MANIFEST] session=${sessionId} -> ${sessionPlaylistUrl.toString()}`
     );
 
-    /* =====================================================
-       REDIRECT PUBLIC RAILWAY
-
-       Safari doit ensuite rester sur :
-
-       /api/vod-hls?s=SESSION
-
-       et recharger CE manifeste pour découvrir
-       seg-000001.ts, seg-000002.ts, etc.
-    ===================================================== */
-
+    /*
+     * Safari reste ensuite sur :
+     *
+     * /api/vod-hls?s=SESSION
+     *
+     * Cette URL relit le manifeste généré par
+     * CE même process FFmpeg.
+     */
     return NextResponse.redirect(
       sessionPlaylistUrl,
       {
@@ -1613,7 +1599,8 @@ export async function GET(
         },
       }
     );
-      } catch (
+
+  } catch (
     error: any
   ) {
     console.error(
@@ -1637,12 +1624,17 @@ export async function GET(
 }
 
 /* =========================================================
+   CONTINUE DIRECTEMENT AVEC PARTIE 3 / 3
+========================================================= */
+/* =========================================================
    HEAD
 
-   Safari/iOS peut effectuer une requête HEAD
+   Safari / iOS peut effectuer une requête HEAD
    avant ou pendant la lecture du manifeste.
 
-   On renvoie les mêmes règles de cache que GET.
+   IMPORTANT :
+   une requête HEAD sans session ne doit jamais
+   démarrer une nouvelle instance FFmpeg.
 ========================================================= */
 
 export async function HEAD(
@@ -1659,9 +1651,10 @@ export async function HEAD(
         "s"
       );
 
-    /*
-     * HEAD d'une playlist existante.
-     */
+    /* =====================================================
+       HEAD D'UNE SESSION EXISTANTE
+    ===================================================== */
+
     if (
       requestedSession
     ) {
@@ -1705,12 +1698,24 @@ export async function HEAD(
         string;
 
       try {
+        /*
+         * Avec temp_file, FFmpeg peut être
+         * précisément entre l'écriture du .tmp
+         * et son rename atomique.
+         *
+         * On laisse donc une courte fenêtre
+         * avant de considérer la session absente.
+         */
         manifest =
           await waitForPlaylist(
             playlist,
             10_000
           );
       } catch {
+        console.warn(
+          `[VOD HLS HEAD NOT FOUND] session=${sessionId}`
+        );
+
         return new Response(
           null,
           {
@@ -1747,6 +1752,10 @@ export async function HEAD(
                 )
               ),
 
+            /*
+             * Safari doit toujours revalider
+             * le manifeste EVENT.
+             */
             "Cache-Control":
               "no-store, no-cache, must-revalidate, max-age=0",
 
@@ -1755,16 +1764,23 @@ export async function HEAD(
 
             "X-GTV-Session":
               sessionId,
+
+            "X-GTV-Manifest-Time":
+              String(
+                Date.now()
+              ),
           },
         }
       );
     }
 
-    /*
-     * HEAD sans session :
-     * la route existe, mais on ne crée surtout
-     * pas un FFmpeg pour une simple requête HEAD.
-     */
+    /* =====================================================
+       HEAD SANS SESSION
+
+       La route existe mais on ne démarre surtout
+       pas FFmpeg pour une simple requête HEAD.
+    ===================================================== */
+
     return new Response(
       null,
       {
@@ -1775,9 +1791,16 @@ export async function HEAD(
 
           "Content-Type":
             "application/vnd.apple.mpegurl; charset=utf-8",
+
+          "Cache-Control":
+            "no-store, no-cache, must-revalidate, max-age=0",
+
+          "X-GTV-Mode":
+            "apple-hls",
         },
       }
     );
+
   } catch (
     error
   ) {
@@ -1815,6 +1838,12 @@ export async function OPTIONS() {
 
         "Access-Control-Allow-Methods":
           "GET, HEAD, OPTIONS",
+
+        "Access-Control-Allow-Headers":
+          "Range, Content-Type, Accept",
+
+        "Access-Control-Expose-Headers":
+          "Content-Length, Content-Range, Accept-Ranges",
 
         "Access-Control-Max-Age":
           "86400",
