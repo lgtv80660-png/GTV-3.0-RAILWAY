@@ -1237,7 +1237,7 @@ export async function GET(
        * de la playlist.
        */
       "-hls_flags",
-      "independent_segments+temp_file+append_list",
+      "independent_segments+temp_file",
 
       /*
        * MPEG-TS explicite.
