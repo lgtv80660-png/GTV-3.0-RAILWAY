@@ -992,22 +992,19 @@ export async function GET(
       UA,
 
       "-rw_timeout",
-      "60000000",
+      "15000000",
 
-      /*
-       * L'upstream Xtream peut couper
-       * momentanément une connexion.
-       *
-       * FFmpeg doit tenter de reprendre
-       * au lieu de terminer immédiatement
-       * la session HLS.
-       */
       "-reconnect",
       "1",
 
       "-reconnect_streamed",
       "1",
 
+      /*
+       * Pour une VOD connue, un EOF réel ne doit pas
+       * être considéré comme la fin tant que l'upstream
+       * annonce encore des données.
+       */
       "-reconnect_at_eof",
       "1",
 
@@ -1017,8 +1014,22 @@ export async function GET(
       "-reconnect_on_http_error",
       "4xx,5xx",
 
+      /*
+       * Versions FFmpeg récentes :
+       * autorise de nombreuses reprises successives.
+       */
+      "-reconnect_max_retries",
+      "50",
+
+      /*
+       * Ne pas laisser l'attente exponentielle devenir
+       * trop longue : Safari possède un buffer limité.
+       */
       "-reconnect_delay_max",
-      "10",
+      "2",
+
+      "-reconnect_delay_total_max",
+      "300",
 
       /*
        * Génération de timestamps propres
