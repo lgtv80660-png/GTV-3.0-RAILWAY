@@ -4,6 +4,10 @@ import { requireSession } from "@/lib/session";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/* =========================================================
+   CACHE
+========================================================= */
+
 type CacheEntry = {
   expiresAt: number;
   value: unknown;
@@ -12,27 +16,36 @@ type CacheEntry = {
 const cache =
   new Map<string, CacheEntry>();
 
-const inflight =
-  new Map<string, Promise<unknown>>();
+/* =========================================================
+   CACHE TTL
+========================================================= */
 
 function ttlFor(action: string) {
-  if (action.includes("categories"))
+  if (action.includes("categories")) {
     return 30 * 60 * 1000;
+  }
 
-  if (action === "get_live_streams")
+  if (action === "get_live_streams") {
     return 10 * 60 * 1000;
+  }
 
   if (
     action === "get_vod_streams" ||
     action === "get_series"
-  )
+  ) {
     return 15 * 60 * 1000;
+  }
 
-  if (action.includes("info"))
+  if (action.includes("info")) {
     return 15 * 60 * 1000;
+  }
 
   return 2 * 60 * 1000;
 }
+
+/* =========================================================
+   CACHEABLE ACTIONS
+========================================================= */
 
 function cacheable(action: string) {
   return [
@@ -47,42 +60,60 @@ function cacheable(action: string) {
   ].includes(action);
 }
 
+/* =========================================================
+   GET
+========================================================= */
+
 export async function GET(req: Request) {
+  /* =======================================================
+     AUTH
+  ======================================================= */
+
   let creds: any;
 
   try {
-    creds = await requireSession();
+    creds =
+      await requireSession();
   } catch {
     return NextResponse.json(
-      { error: "Non authentifié" },
-      { status: 401 }
+      {
+        error: "Non authentifié",
+      },
+      {
+        status: 401,
+      }
     );
   }
 
   try {
-    const { searchParams } =
-      new URL(req.url);
+    const {
+      searchParams,
+    } = new URL(req.url);
 
     const action =
       searchParams.get("action") || "";
 
+    /* =====================================================
+       XTREAM CREDENTIALS
+    ===================================================== */
+
     const baseUrl = String(
       creds?.baseUrl ||
-      creds?.url ||
-      creds?.serverUrl ||
-      ""
+        creds?.url ||
+        creds?.serverUrl ||
+        ""
     ).replace(/\/+$/, "");
 
     const username = String(
       creds?.username ||
-      creds?.user ||
-      ""
+        creds?.user ||
+        ""
     );
 
     const password = String(
       creds?.password ||
-      creds?.pass ||
-      ""
+        creds?.pass ||
+        ""
     );
 
     if (
@@ -95,9 +126,15 @@ export async function GET(req: Request) {
           error:
             "Identifiants incomplets",
         },
-        { status: 400 }
+        {
+          status: 400,
+        }
       );
     }
+
+    /* =====================================================
+       FORWARDED PARAMETERS
+    ===================================================== */
 
     const forwarded =
       new URLSearchParams();
@@ -113,8 +150,19 @@ export async function GET(req: Request) {
       }
     );
 
+    /* =====================================================
+       CACHE KEY
+    ===================================================== */
+
     const cacheKey =
-      `${baseUrl}|${username}|${action}|${forwarded.toString()}`;
+      `${baseUrl}|` +
+      `${username}|` +
+      `${action}|` +
+      `${forwarded.toString()}`;
+
+    /* =====================================================
+       CACHE HIT
+    ===================================================== */
 
     if (cacheable(action)) {
       const hit =
@@ -122,134 +170,322 @@ export async function GET(req: Request) {
 
       if (
         hit &&
-        hit.expiresAt > Date.now()
+        hit.expiresAt >
+          Date.now()
       ) {
         return NextResponse.json(
           hit.value,
           {
+            status: 200,
+
             headers: {
               "Cache-Control":
                 "private, max-age=60, stale-while-revalidate=300",
+
               "x-gtv-cache":
                 "hit",
             },
           }
         );
       }
+
+      /*
+       * Supprime éventuellement
+       * l'entrée expirée.
+       */
+      if (hit) {
+        cache.delete(
+          cacheKey
+        );
+      }
     }
 
-    const load = async () => {
-      const url = new URL(
+    /* =====================================================
+       XTREAM URL
+    ===================================================== */
+
+    const upstreamUrl =
+      new URL(
         `${baseUrl}/player_api.php`
       );
 
-      url.searchParams.set(
-        "username",
-        username
-      );
+    upstreamUrl.searchParams.set(
+      "username",
+      username
+    );
 
-      url.searchParams.set(
-        "password",
-        password
-      );
+    upstreamUrl.searchParams.set(
+      "password",
+      password
+    );
 
-      if (action) {
-        url.searchParams.set(
-          "action",
-          action
+    if (action) {
+      upstreamUrl.searchParams.set(
+        "action",
+        action
+      );
+    }
+
+    forwarded.forEach(
+      (value, key) => {
+        upstreamUrl.searchParams.append(
+          key,
+          value
         );
       }
+    );
 
-      forwarded.forEach(
-        (value, key) =>
-          url.searchParams.append(
-            key,
-            value
-          )
+    /* =====================================================
+       FETCH XTREAM
+
+       IMPORTANT:
+       - aucun inflight global
+       - timeout local
+       - chaque requête est indépendante
+    ===================================================== */
+
+    const controller =
+      new AbortController();
+
+    const timeout =
+      setTimeout(
+        () => {
+          controller.abort();
+        },
+        12_000
       );
 
-      const res = await fetch(
-        url.toString(),
+    let res: Response;
+
+    try {
+      res = await fetch(
+        upstreamUrl.toString(),
         {
+          method: "GET",
+
           headers: {
-            "User-Agent": "GTV/3.0",
+            "User-Agent":
+              "GTV/3.0",
+
+            Accept:
+              "application/json, text/plain, */*",
           },
-          cache: "no-store",
+
+          cache:
+            "no-store",
+
           signal:
-            AbortSignal.timeout(
-              15000
-            ),
+            controller.signal,
         }
       );
-
-      if (!res.ok) {
-        throw Object.assign(
-          new Error(
-            `Erreur IPTV (${res.status})`
-          ),
+    } catch (error: any) {
+      if (
+        controller.signal.aborted
+      ) {
+        return NextResponse.json(
           {
-            status:
-              res.status,
+            error:
+              "Timeout serveur Xtream",
+          },
+          {
+            status: 504,
+
+            headers: {
+              "Cache-Control":
+                "no-store",
+            },
           }
         );
       }
 
-      return res.json();
-    };
+      console.error(
+        "[XTREAM FETCH ERROR]",
+        action,
+        error?.message ||
+          error
+      );
 
-    let promise =
-      inflight.get(cacheKey);
+      return NextResponse.json(
+        {
+          error:
+            "Connexion au serveur Xtream impossible",
+        },
+        {
+          status: 502,
 
-    if (!promise) {
-      promise = load();
-
-      inflight.set(
-        cacheKey,
-        promise
+          headers: {
+            "Cache-Control":
+              "no-store",
+          },
+        }
+      );
+    } finally {
+      clearTimeout(
+        timeout
       );
     }
 
-    let data: unknown;
+    /* =====================================================
+       HTTP ERROR
+    ===================================================== */
+
+    if (!res.ok) {
+      console.warn(
+        `[XTREAM UPSTREAM] action=${action || "auth"} status=${res.status}`
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            `Erreur IPTV (${res.status})`,
+        },
+        {
+          status:
+            res.status,
+
+          headers: {
+            "Cache-Control":
+              "no-store",
+          },
+        }
+      );
+    }
+
+    /* =====================================================
+       READ RESPONSE
+    ===================================================== */
+
+    let data:
+      unknown;
 
     try {
-      data = await promise;
-    } finally {
-      inflight.delete(
-        cacheKey
+      const text =
+        await res.text();
+
+      if (!text) {
+        return NextResponse.json(
+          {
+            error:
+              "Réponse Xtream vide",
+          },
+          {
+            status: 502,
+
+            headers: {
+              "Cache-Control":
+                "no-store",
+            },
+          }
+        );
+      }
+
+      try {
+        data =
+          JSON.parse(text);
+      } catch {
+        console.error(
+          `[XTREAM JSON ERROR] action=${action || "auth"} length=${text.length}`
+        );
+
+        return NextResponse.json(
+          {
+            error:
+              "Réponse Xtream invalide",
+          },
+          {
+            status: 502,
+
+            headers: {
+              "Cache-Control":
+                "no-store",
+            },
+          }
+        );
+      }
+    } catch (
+      error: any
+    ) {
+      console.error(
+        "[XTREAM READ ERROR]",
+        action,
+        error?.message ||
+          error
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "Impossible de lire la réponse Xtream",
+        },
+        {
+          status: 502,
+
+          headers: {
+            "Cache-Control":
+              "no-store",
+          },
+        }
       );
     }
 
+    /* =====================================================
+       SAVE CACHE
+    ===================================================== */
+
     if (cacheable(action)) {
-      cache.set(cacheKey, {
-        expiresAt:
-          Date.now() +
-          ttlFor(action),
-        value: data,
-      });
+      cache.set(
+        cacheKey,
+        {
+          expiresAt:
+            Date.now() +
+            ttlFor(action),
+
+          value:
+            data,
+        }
+      );
     }
+
+    /* =====================================================
+       SUCCESS
+    ===================================================== */
 
     return NextResponse.json(
       data,
       {
+        status: 200,
+
         headers: {
           "Cache-Control":
             "private, max-age=30, stale-while-revalidate=180",
+
           "x-gtv-cache":
             "miss",
         },
       }
     );
-  } catch (err: any) {
+  } catch (
+    error: any
+  ) {
+    console.error(
+      "[XTREAM ROUTE ERROR]",
+      error?.message ||
+        error
+    );
+
     return NextResponse.json(
       {
         error:
-          err?.message ||
+          error?.message ||
           "Erreur serveur",
       },
       {
-        status:
-          err?.status ||
-          500,
+        status: 500,
+
+        headers: {
+          "Cache-Control":
+            "no-store",
+        },
       }
     );
   }
