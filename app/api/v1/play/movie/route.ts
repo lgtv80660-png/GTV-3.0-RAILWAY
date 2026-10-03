@@ -17,17 +17,16 @@ export async function GET(req: Request) {
 
       return NextResponse.json(
         {
-          error:"Non authentifié"
+          error: "Non authentifié"
         },
         {
-          status:401
+          status: 401
         }
       );
     }
 
 
-    const { searchParams } =
-      new URL(req.url);
+    const { searchParams } = new URL(req.url);
 
 
     const id =
@@ -38,10 +37,10 @@ export async function GET(req: Request) {
 
       return NextResponse.json(
         {
-          error:"Missing movie id"
+          error: "Missing movie id"
         },
         {
-          status:400
+          status: 400
         }
       );
     }
@@ -53,8 +52,7 @@ export async function GET(req: Request) {
         creds?.url ||
         creds?.serverUrl ||
         ""
-      )
-      .replace(/\/+$/, "");
+      ).replace(/\/+$/, "");
 
 
     const username =
@@ -81,10 +79,10 @@ export async function GET(req: Request) {
 
       return NextResponse.json(
         {
-          error:"Xtream credentials missing"
+          error: "Xtream credentials missing"
         },
         {
-          status:400
+          status: 400
         }
       );
     }
@@ -92,9 +90,8 @@ export async function GET(req: Request) {
 
 
     /*
-       Récupération infos VOD
+      Récupération informations VOD Xtream
     */
-
 
     const infoUrl =
       new URL(
@@ -131,10 +128,11 @@ export async function GET(req: Request) {
       await fetch(
         infoUrl.toString(),
         {
-          headers:{
-            "User-Agent":"GTV/3.0"
+          headers: {
+            "User-Agent": "GTV/3.0",
+            "Accept": "application/json"
           },
-          cache:"no-store"
+          cache: "no-store"
         }
       );
 
@@ -144,23 +142,19 @@ export async function GET(req: Request) {
 
       return NextResponse.json(
         {
-          error:"Impossible de récupérer le film"
+          error: "Impossible de récupérer le film"
         },
         {
-          status:502
+          status: 502
         }
       );
     }
 
 
+
     const info =
       await infoResponse.json();
 
-
-
-    /*
-       Construction URL lecture
-    */
 
 
     const movie =
@@ -172,10 +166,10 @@ export async function GET(req: Request) {
 
       return NextResponse.json(
         {
-          error:"Film introuvable"
+          error: "Film introuvable"
         },
         {
-          status:404
+          status: 404
         }
       );
     }
@@ -189,38 +183,65 @@ export async function GET(req: Request) {
 
 
     /*
-      On prépare la future sortie HLS
-      pour Web + Android
+      Nouveau pipeline GTV
+
+      MKV Xtream
+          |
+          |
+       vod-hls
+          |
+          |
+       FFmpeg HLS
+          |
+          |
+       m3u8 + segments TS
+
+      Compatible:
+      - Web
+      - Android Media3
+      - TV
     */
 
 
-    return NextResponse.json({
+    return NextResponse.json(
 
-      success:true,
+      {
+        success: true,
 
-      media:{
-        id,
-        type:"movie",
+        media: {
 
-        original:{
-          extension,
-          streamId:id
-        },
+          id,
+
+          type: "movie",
 
 
-        playback:{
-          type:"hls",
+          original: {
 
-          url:
-          `/api/stream-vod?type=movie&id=${id}&ext=${extension}`
+            extension,
+
+            streamId: id
+
+          },
+
+
+          playback: {
+
+            type: "hls",
+
+
+            url:
+              `/api/vod-hls?type=movie&id=${id}&ext=${extension}`
+
+          }
+
         }
 
       }
 
-    });
+    );
 
 
-  } catch(error:any){
+  } catch (error: any) {
 
 
     console.error(
@@ -230,14 +251,17 @@ export async function GET(req: Request) {
 
 
     return NextResponse.json(
+
       {
         error:
-        error?.message ||
-        "Playback error"
+          error?.message ||
+          "Playback error"
       },
+
       {
-        status:500
+        status: 500
       }
+
     );
 
   }
